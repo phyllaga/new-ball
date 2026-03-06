@@ -1,6 +1,6 @@
 // api.js
 
-const DEFAULT_BASE_URL = "http://43.198.223.119:8080";
+const DEFAULT_BASE_URL = "https://ball.skybit.shop";
 
 function buildQuery(params = {}) {
     const search = new URLSearchParams();
