@@ -521,7 +521,7 @@ export default function SoccerEarlyMarketPage() {
                                 原始返回数据
                             </div>
 
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, height: 100% }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, height: "100%" }}>
                                 <div style={{ borderRight: "1px solid #e5e7eb", padding: 16 }}>
                                     <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>联赛接口</div>
                                     <pre
