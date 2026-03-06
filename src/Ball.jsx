@@ -65,7 +65,7 @@ function getScore(match) {
 }
 
 export default function SoccerEarlyMarketPage() {
-    const [baseUrl, setBaseUrl] = useState("http://43.198.223.119:8080");
+    const [baseUrl, setBaseUrl] = useState("https://ball.skybit.shop");
     const [userId, setUserId] = useState("1000");
     const [type, setType] = useState("0");
 
