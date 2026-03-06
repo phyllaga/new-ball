@@ -1,5 +1,5 @@
 import React from 'react';
-import ContractFormulaCalculator from './ContractFormulaCalculator';
+import Ball from './Ball';
 
 function App() {
   return (
@@ -7,7 +7,7 @@ function App() {
       <header className="text-center mb-8">
         <h1 className="text-2xl font-bold">加密货币合约交易工具</h1>
       </header>
-      <ContractFormulaCalculator />
+      <Ball />
     </div>
   );
 }
