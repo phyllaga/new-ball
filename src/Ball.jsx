@@ -1,33 +1,42 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { getBet365All, getLeagueGroup } from "./api";
 
-function getMatchListFromOddsResponse(raw) {
+function getMatchListFromOddsResponse(raw, matchType) {
     // 尽量兼容不同返回结构
     if (!raw) return [];
 
     const data = raw?.data?.data ?? raw?.data ?? raw;
 
-    if (Array.isArray(data)) return data;
+    // bet365/all 格式: data.inPlay / data.preMatch = [ { key, value: [matches] } ]
+    // matchType: "0" 或 0 = 早盘(preMatch)，"1" 或 1 = 滚球(inPlay)
+    const isRolling = matchType === 1 || matchType === "1";
+    const list = isRolling ? data?.inPlay : data?.preMatch;
+    if (Array.isArray(list)) {
+        return list.flatMap((item) => item?.value ?? []);
+    }
 
+    if (Array.isArray(data)) return data;
     if (Array.isArray(data?.list)) return data.list;
     if (Array.isArray(data?.matchList)) return data.matchList;
     if (Array.isArray(data?.events)) return data.events;
-    if (Array.isArray(data?.data)) return data.data;
 
     return [];
 }
 
 function getMatchKey(match, index) {
     return (
+        match?.id ||
+        match?.bet365Id ||
         match?.eventId ||
         match?.matchId ||
-        match?.id ||
-        `${match?.homeTeamName || "home"}_${match?.awayTeamName || "away"}_${index}`
+        `${match?.homeNameCN || match?.homeTeamName || "home"}_${match?.awayNameCN || match?.awayTeamName || "away"}_${index}`
     );
 }
 
 function getHomeName(match) {
     return (
+        match?.homeNameCN ||
+        match?.homeNameEN ||
         match?.homeTeamName ||
         match?.homeName ||
         match?.team1Name ||
@@ -38,6 +47,8 @@ function getHomeName(match) {
 
 function getAwayName(match) {
     return (
+        match?.awayNameCN ||
+        match?.awayNameEN ||
         match?.awayTeamName ||
         match?.awayName ||
         match?.team2Name ||
@@ -47,21 +58,64 @@ function getAwayName(match) {
 }
 
 function getMatchTime(match) {
-    return (
-        match?.matchTime ||
-        match?.startTime ||
-        match?.eventTime ||
-        match?.time ||
-        "-"
-    );
+    const t = match?.time ?? match?.matchTime ?? match?.startTime ?? match?.eventTime;
+    if (t == null) return "-";
+    const ts = typeof t === "number" ? t * (t < 1e10 ? 1000 : 1) : new Date(t).getTime();
+    const d = new Date(ts);
+    return d.toLocaleString("zh-CN", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+    });
 }
 
 function getScore(match) {
     if (match?.score) return match.score;
+    if (match?.ballScore != null && typeof match.ballScore === "string") return match.ballScore;
     if (match?.homeScore !== undefined || match?.awayScore !== undefined) {
         return `${match?.homeScore ?? 0} : ${match?.awayScore ?? 0}`;
     }
     return "-";
+}
+
+// 主要玩法展示顺序（bet365 风格）
+const MAIN_MARKET_KEYS = [
+    { key: "40_full_time_result", label: "胜平负" },
+    { key: "938_asian_handicap", label: "亚盘" },
+    { key: "981_goals_over_under", label: "大小球" },
+    { key: "10143_goal_line", label: "球半" },
+    { key: "1579_half_time_result", label: "半场胜平负" },
+    { key: "10257_half_time_double_chance", label: "半场双重机会" },
+];
+
+function MarketOddsCell({ marketKey, label, oddsObj }) {
+    if (!oddsObj?.odds?.length) return null;
+    const list = oddsObj.odds;
+
+    return (
+        <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>{label || oddsObj.name}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {list.map((item, i) => (
+                    <span
+                        key={item.id || i}
+                        style={{
+                            fontSize: 13,
+                            padding: "4px 10px",
+                            background: "#f3f4f6",
+                            borderRadius: 6,
+                            color: "#111827",
+                        }}
+                    >
+                        {item.header ? `${item.header} ` : ""}
+                        {item.name != null ? item.name : item.handicap}
+                        <span style={{ marginLeft: 6, fontWeight: 600 }}>{item.odds}</span>
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
 }
 
 export default function SoccerEarlyMarketPage() {
@@ -79,7 +133,10 @@ export default function SoccerEarlyMarketPage() {
     const [leagueRaw, setLeagueRaw] = useState(null);
     const [matchRaw, setMatchRaw] = useState(null);
 
-    const matchList = useMemo(() => getMatchListFromOddsResponse(matchRaw), [matchRaw]);
+    const matchList = useMemo(
+        () => getMatchListFromOddsResponse(matchRaw, type),
+        [matchRaw, type]
+    );
 
     const loadLeagues = async () => {
         setError("");
@@ -391,7 +448,7 @@ export default function SoccerEarlyMarketPage() {
                                 ) : null}
                             </div>
 
-                            <div style={{ padding: 16, maxHeight: 420, overflowY: "auto" }}>
+                            <div style={{ padding: 16, maxHeight: 520, overflowY: "auto" }}>
                                 {matchLoading ? (
                                     <div
                                         style={{
@@ -412,79 +469,77 @@ export default function SoccerEarlyMarketPage() {
                                                 border: "1px solid #e5e7eb",
                                                 borderRadius: 14,
                                                 padding: 16,
-                                                marginBottom: 12,
-                                                background: "#fafafa",
+                                                marginBottom: 16,
+                                                background: "#fff",
                                             }}
                                         >
                                             <div
                                                 style={{
                                                     display: "flex",
                                                     justifyContent: "space-between",
-                                                    gap: 12,
-                                                    marginBottom: 10,
+                                                    alignItems: "center",
+                                                    marginBottom: 12,
+                                                    paddingBottom: 10,
+                                                    borderBottom: "1px solid #e5e7eb",
                                                 }}
                                             >
-                                                <div style={{ fontSize: 12, color: "#6b7280" }}>
-                                                    时间：{getMatchTime(match)}
+                                                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                                                    <div style={{ fontSize: 15, fontWeight: 700, lineHeight: 1.4 }}>
+                                                        {getHomeName(match)} VS {getAwayName(match)}
+                                                    </div>
+                                                    {match?.timeStatus === "1" && (
+                                                        <span
+                                                            style={{
+                                                                fontSize: 11,
+                                                                fontWeight: 600,
+                                                                color: "#dc2626",
+                                                                background: "#fef2f2",
+                                                                padding: "2px 8px",
+                                                                borderRadius: 6,
+                                                            }}
+                                                        >
+                                                            滚球
+                                                        </span>
+                                                    )}
                                                 </div>
-                                                <div style={{ fontSize: 12, color: "#6b7280" }}>
-                                                    比分：{getScore(match)}
+                                                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                                                    {match?.timeStatus === "1" && getScore(match) !== "-" && (
+                                                        <span style={{ fontSize: 13, color: "#059669", fontWeight: 600 }}>
+                                                            {getScore(match)}
+                                                        </span>
+                                                    )}
+                                                    <span style={{ fontSize: 12, color: "#6b7280" }}>
+                                                        {getMatchTime(match)}
+                                                    </span>
                                                 </div>
-                                            </div>
-
-                                            <div style={{ fontSize: 16, fontWeight: 700, lineHeight: 1.5 }}>
-                                                {getHomeName(match)} VS {getAwayName(match)}
                                             </div>
 
                                             <div
                                                 style={{
-                                                    display: "flex",
-                                                    gap: 12,
-                                                    flexWrap: "wrap",
-                                                    marginTop: 12,
-                                                    fontSize: 12,
-                                                    color: "#4b5563",
+                                                    display: "grid",
+                                                    gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+                                                    gap: 16,
                                                 }}
                                             >
-                                                {match?.eventId !== undefined && (
-                                                    <span
-                                                        style={{
-                                                            background: "#eef2ff",
-                                                            color: "#4338ca",
-                                                            padding: "4px 8px",
-                                                            borderRadius: 999,
-                                                        }}
-                                                    >
-                            eventId: {match.eventId}
-                          </span>
-                                                )}
-
-                                                {match?.marketCount !== undefined && (
-                                                    <span
-                                                        style={{
-                                                            background: "#ecfeff",
-                                                            color: "#0f766e",
-                                                            padding: "4px 8px",
-                                                            borderRadius: 999,
-                                                        }}
-                                                    >
-                            盘口数: {match.marketCount}
-                          </span>
-                                                )}
-
-                                                {match?.status !== undefined && (
-                                                    <span
-                                                        style={{
-                                                            background: "#f3f4f6",
-                                                            color: "#374151",
-                                                            padding: "4px 8px",
-                                                            borderRadius: 999,
-                                                        }}
-                                                    >
-                            状态: {String(match.status)}
-                          </span>
-                                                )}
+                                                {MAIN_MARKET_KEYS.map(({ key, label }) => {
+                                                    const oddsObj = match?.odds?.[key];
+                                                    return (
+                                                        <MarketOddsCell
+                                                            key={key}
+                                                            marketKey={key}
+                                                            label={label}
+                                                            oddsObj={oddsObj}
+                                                        />
+                                                    );
+                                                })}
                                             </div>
+
+                                            {match?.id != null && (
+                                                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 10 }}>
+                                                    ID: {match.id}
+                                                    {match.bet365Id != null && ` · bet365: ${match.bet365Id}`}
+                                                </div>
+                                            )}
                                         </div>
                                     ))
                                 ) : (
