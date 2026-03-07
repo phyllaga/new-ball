@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState, useRef } from "react";
-import { getBet365All, getLeagueGroup } from "./api";
+import React, { useEffect, useMemo, useState, useRef, useCallback } from "react";
+import { getBet365All, getLeagueGroup, createOrder, createContactOrder, getOrderList, getOrderFlow } from "./api";
 import { useOddsSocket } from "./useOddsSocket";
 
 function getMatchListFromOddsResponse(raw, matchType) {
@@ -120,6 +120,15 @@ function getScore(match) {
     return "-";
 }
 
+/** 滚球赔率 分数转小数 (如 "4/5" -> 1.8，即 4/5+1) */
+function inplayOddsToDecimal(od) {
+    if (od == null || od === "" || od === "-") return null;
+    const s = String(od).trim();
+    const parts = s.split("/").map((p) => parseFloat(p.trim()));
+    if (parts.length !== 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1]) || parts[1] === 0) return null;
+    return Math.round((parts[0] / parts[1] + 1) * 100) / 100;
+}
+
 // 主要玩法展示顺序（bet365 风格）
 const MAIN_MARKET_KEYS = [
     { key: "40_full_time_result", label: "胜平负" },
@@ -162,9 +171,13 @@ function getSelectedDayTimestamp(dayIndex) {
     return getStartOfDaySingapore(now) + dayIndex * 24 * 3600 * 1000;
 }
 
-function MarketOddsCell({ marketKey, label, oddsObj }) {
+function MarketOddsCell({ marketKey, label, oddsObj, match, onAddSlip }) {
     if (!oddsObj?.odds?.length) return null;
     const list = oddsObj.odds;
+    const [bid, ...rest] = (marketKey || "").split("_");
+    const betPlayId = bid || "";
+    const betPlayName = rest.length ? rest.join("_") : marketKey || "";
+    const bigTypeName = bid || "";
 
     return (
         <div style={{ marginBottom: 10 }}>
@@ -173,12 +186,17 @@ function MarketOddsCell({ marketKey, label, oddsObj }) {
                 {list.map((item, i) => (
                     <span
                         key={item.id || i}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => onAddSlip?.({ type: "pre", match, marketKey, label: label || oddsObj.name, item, betPlayId, betPlayName, bigTypeName })}
+                        onKeyDown={(e) => e.key === "Enter" && onAddSlip?.({ type: "pre", match, marketKey, label: label || oddsObj.name, item, betPlayId, betPlayName, bigTypeName })}
                         style={{
                             fontSize: 13,
                             padding: "4px 10px",
                             background: "#f3f4f6",
                             borderRadius: 6,
                             color: "#111827",
+                            cursor: onAddSlip ? "pointer" : "default",
                         }}
                     >
                         {item.header ? `${item.header} ` : ""}
@@ -192,7 +210,7 @@ function MarketOddsCell({ marketKey, label, oddsObj }) {
 }
 
 /** 滚球：单个玩法（MAVO）展示，co[].pa 为选项，na/pNa 名称，od 赔率，ha 盘口 */
-function RollingMarketCell({ mavo }) {
+function RollingMarketCell({ mavo, match, onAddSlip }) {
     const options = mavo?.co?.flatMap((c) => c.pa || []) ?? [];
     if (options.length === 0) return null;
     const title = mavo.na || mavo.id || "";
@@ -201,26 +219,35 @@ function RollingMarketCell({ mavo }) {
         <div style={{ marginBottom: 10 }}>
             <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>{title}</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {options.map((pa, i) => (
-                    <span
-                        key={pa.id || i}
-                        style={{
-                            fontSize: 13,
-                            padding: "4px 10px",
-                            background: "#f3f4f6",
-                            borderRadius: 6,
-                            color: "#111827",
-                        }}
-                    >
-                        {(pa.na != null && pa.na !== "") ? pa.na : (pa.pNa != null ? pa.pNa : "-")}
-                        {pa.ha != null && String(pa.ha).trim() !== "" && (
-                            <span style={{ color: "#6b7280", marginLeft: 4 }}>({pa.ha})</span>
-                        )}
-                        {pa.od != null && (
-                            <span style={{ marginLeft: 6, fontWeight: 600 }}>{pa.od}</span>
-                        )}
-                    </span>
-                ))}
+                {options.map((pa, i) => {
+                    const odDecimal = inplayOddsToDecimal(pa?.od);
+                    const canAdd = onAddSlip && pa?.id && odDecimal != null;
+                    return (
+                        <span
+                            key={pa.id || i}
+                            role="button"
+                            tabIndex={canAdd ? 0 : undefined}
+                            onClick={() => canAdd && onAddSlip({ type: "inplay", match, mavo, pa, odDecimal })}
+                            onKeyDown={(e) => canAdd && e.key === "Enter" && onAddSlip({ type: "inplay", match, mavo, pa, odDecimal })}
+                            style={{
+                                fontSize: 13,
+                                padding: "4px 10px",
+                                background: "#f3f4f6",
+                                borderRadius: 6,
+                                color: "#111827",
+                                cursor: canAdd ? "pointer" : "default",
+                            }}
+                        >
+                            {(pa.na != null && pa.na !== "") ? pa.na : (pa.pNa != null ? pa.pNa : "-")}
+                            {pa.ha != null && String(pa.ha).trim() !== "" && (
+                                <span style={{ color: "#6b7280", marginLeft: 4 }}>({pa.ha})</span>
+                            )}
+                            {pa.od != null && (
+                                <span style={{ marginLeft: 6, fontWeight: 600 }}>{pa.od}</span>
+                            )}
+                        </span>
+                    );
+                })}
             </div>
         </div>
     );
@@ -243,6 +270,20 @@ export default function SoccerEarlyMarketPage() {
     /** 赔率 WS 更新高亮：{ eventId, maId }，约 600ms 后清除 */
     const [highlight, setHighlight] = useState(null);
     const highlightTimerRef = useRef(null);
+
+    /** 投注单：每项 { key, type:'pre'|'inplay', match, ... } */
+    const [betSlip, setBetSlip] = useState([]);
+    const [confirmStep, setConfirmStep] = useState(false);
+    const [betAmount, setBetAmount] = useState("");
+    const [isBestOdd, setIsBestOdd] = useState(true);
+    const [submitLoading, setSubmitLoading] = useState(false);
+    const [submitError, setSubmitError] = useState("");
+    /** 订单列表 / 结算 */
+    const [orderList, setOrderList] = useState([]);
+    const [orderListTotal, setOrderListTotal] = useState(0);
+    const [orderListLoading, setOrderListLoading] = useState(false);
+    const [orderFlow, setOrderFlow] = useState(null);
+    const slipKeyRef = useRef(0);
 
     // 日期 Tab：0=今日，1..9=往后 9 天；请求用 day=选中日 0 点时间戳(ms)，与后端一致，避免时区错位
     const [selectedDayIndex, setSelectedDayIndex] = useState(0);
@@ -290,8 +331,8 @@ export default function SoccerEarlyMarketPage() {
 
             if (list.length > 0) {
                 setSelectedLeague(list[0]);
-            } else if (type === "1") {
-                setSelectedLeague({ leagueId: "", leagueName: "全部" });
+            } else {
+                setSelectedLeague(null);
             }
         } catch (err) {
             setError(err.message || "获取联赛列表失败");
@@ -302,7 +343,7 @@ export default function SoccerEarlyMarketPage() {
     };
 
     const loadMatchesByLeague = async (league) => {
-        if (type !== "1" && !league?.leagueId) return;
+        if (!league?.leagueId) return;
 
         setError("");
         setSelectedLeague(league);
@@ -313,14 +354,14 @@ export default function SoccerEarlyMarketPage() {
                 baseUrl,
                 userId,
                 day: type === "1" ? undefined : selectedDayTs,
-                leagueIds: league?.leagueId ?? "",
+                leagueIds: league.leagueId,
                 daysOfTime: type === "1" ? undefined : 1,
             });
 
             setMatchRaw({
                 request: {
-                    leagueName: league?.leagueName ?? "全部",
-                    leagueId: league?.leagueId ?? "",
+                    leagueName: league.leagueName ?? "",
+                    leagueId: league.leagueId ?? "",
                     day: type === "1" ? undefined : selectedDayTs,
                     daysOfTime: type === "1" ? undefined : 1,
                 },
@@ -339,12 +380,173 @@ export default function SoccerEarlyMarketPage() {
         loadLeagues();
     }, [selectedDayIndex, type]);
 
-    // 滚球时 selectedLeague 可为「全部」(leagueId="")，也要请求；早盘需 selectedLeague.leagueId
+    // 早盘、滚球均需选中联赛（leagueId）后才请求比赛列表；未选中则清空列表
     useEffect(() => {
-        if (type === "1" ? selectedLeague != null : selectedLeague?.leagueId) {
+        if (selectedLeague?.leagueId) {
             loadMatchesByLeague(selectedLeague);
+        } else {
+            setMatchRaw(null);
         }
     }, [selectedLeague?.leagueId, selectedLeague?.leagueName, selectedDayTs, type]);
+
+    const addToSlip = useCallback((payload) => {
+        if (payload.type === "pre") {
+            const { match, marketKey, label, item, betPlayId, betPlayName, bigTypeName } = payload;
+            const odds = parseFloat(item.odds);
+            if (!Number.isFinite(odds) || !match?.id) return;
+            setBetSlip((prev) => [
+                ...prev,
+                {
+                    key: `pre_${match.id}_${item.id}_${slipKeyRef.current++}`,
+                    type: "pre",
+                    match,
+                    marketKey,
+                    label,
+                    item,
+                    eventId: String(match.id),
+                    bet365Id: String(match.bet365Id ?? match.id),
+                    timeType: 0,
+                    oddingId: String(item.id),
+                    handicap: item.handicap != null ? String(item.handicap) : "",
+                    odds,
+                    betPlayId,
+                    betPlayName,
+                    bigTypeName,
+                    oddsMarkets: marketKey,
+                    selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${label} ${item.name != null ? item.name : item.handicap} @${item.odds}`,
+                },
+            ]);
+        } else {
+            const { match, mavo, pa, odDecimal } = payload;
+            if (!match?.id || !pa?.id || odDecimal == null) return;
+            setBetSlip((prev) => [
+                ...prev,
+                {
+                    key: `in_${match.id}_${mavo?.id}_${pa.id}_${slipKeyRef.current++}`,
+                    type: "inplay",
+                    match,
+                    mavo,
+                    pa,
+                    eventId: String(match.id),
+                    bet365Id: String(match.bet365Id ?? match.id),
+                    timeType: 1,
+                    oddingId: String(pa.id),
+                    paId: mavo?.id != null ? String(mavo.id) : "",
+                    handicap: pa.ha != null ? String(pa.ha) : "",
+                    odds: odDecimal,
+                    oddsMarkets: "inplay",
+                    betPlayId: "",
+                    betPlayName: "",
+                    bigTypeName: "",
+                    selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${mavo?.na || ""} ${(pa.na || pa.pNa) || ""} @${pa.od}`,
+                },
+            ]);
+        }
+    }, []);
+
+    const removeFromSlip = (key) => setBetSlip((prev) => prev.filter((x) => x.key !== key));
+
+    const slipToBetOrder = (item) => {
+        const base = {
+            eventId: item.eventId,
+            bet365Id: item.bet365Id,
+            odds: item.odds,
+            timeType: item.timeType,
+            oddingId: item.oddingId,
+            handicap: item.handicap ?? "",
+            oddsMarkets: item.oddsMarkets ?? "",
+            betPlayId: item.betPlayId ?? "",
+            betPlayName: item.betPlayName ?? "",
+            bigTypeName: item.bigTypeName ?? "",
+        };
+        if (item.type === "inplay") base.paId = item.paId ?? "";
+        return base;
+    };
+
+    const loadOrderList = useCallback(async () => {
+        setOrderListLoading(true);
+        try {
+            const res = await getOrderList({ baseUrl, userId, type: 0, page: 1, size: 30 });
+            // 后端 ok(PageResponse) => { code: 0, data: { data: [...], total } }
+            const page = res?.data?.data;
+            const list = Array.isArray(page?.data) ? page.data : Array.isArray(page) ? page : [];
+            setOrderList(list);
+            setOrderListTotal(page?.total ?? list.length);
+        } catch {
+            setOrderList([]);
+            setOrderListTotal(0);
+        } finally {
+            setOrderListLoading(false);
+        }
+    }, [baseUrl, userId]);
+
+    const loadOrderFlow = useCallback(async () => {
+        try {
+            const res = await getOrderFlow({ baseUrl, userId });
+            // 后端 ok(SettlementSumVO) => { code: 0, data: vo }
+            setOrderFlow(res?.data?.data ?? res?.data ?? null);
+        } catch {
+            setOrderFlow(null);
+        }
+    }, [baseUrl, userId]);
+
+    useEffect(() => {
+        if (baseUrl && userId) {
+            loadOrderList();
+            loadOrderFlow();
+        }
+    }, [baseUrl, userId, loadOrderList, loadOrderFlow]);
+
+    const handleSubmitOrder = async () => {
+        const amount = parseFloat(betAmount);
+        if (!Number.isFinite(amount) || amount <= 0 || betSlip.length === 0) {
+            setSubmitError("请输入有效金额");
+            return;
+        }
+        setSubmitError("");
+        setSubmitLoading(true);
+        try {
+            const betOrderList = betSlip.map((s) => ({
+                ...slipToBetOrder(s),
+                betAmount: amount,
+            }));
+            if (betSlip.length === 1) {
+                const res = await createOrder({
+                    baseUrl,
+                    userId,
+                    betOrder: { ...betOrderList[0], betAmount: amount },
+                    isBestOdd: isBestOdd,
+                });
+                if (res?.data?.code !== 0 && res?.data?.code !== undefined) {
+                    throw new Error(res?.data?.msg || "下单失败");
+                }
+            } else {
+                const res = await createContactOrder({
+                    baseUrl,
+                    userId,
+                    betOrderList,
+                    isBestOdd: isBestOdd,
+                });
+                if (res?.data?.code !== 0 && res?.data?.code !== undefined) {
+                    throw new Error(res?.data?.msg || "下单失败");
+                }
+            }
+            setBetSlip([]);
+            setConfirmStep(false);
+            setBetAmount("");
+            loadOrderList();
+            loadOrderFlow();
+        } catch (err) {
+            setSubmitError(err.message || "下单失败");
+        } finally {
+            setSubmitLoading(false);
+        }
+    };
+
+    const parlayOdds = useMemo(() => {
+        if (betSlip.length === 0) return 0;
+        return betSlip.reduce((acc, s) => acc * (s.odds || 0), 1);
+    }, [betSlip]);
 
     return (
         <div
@@ -473,11 +675,11 @@ export default function SoccerEarlyMarketPage() {
                     </div>
                 ) : null}
 
-                {/* 联赛列表 + 比赛列表：占满剩余高度，左对齐 */}
+                {/* 联赛 + 比赛列表 + 右侧投注单 */}
                 <div
                     style={{
                         display: "grid",
-                        gridTemplateColumns: "280px 1fr",
+                        gridTemplateColumns: "280px 1fr 320px",
                         gap: 12,
                         flex: 1,
                         minHeight: 0,
@@ -728,7 +930,12 @@ export default function SoccerEarlyMarketPage() {
                                                     }}
                                                 >
                                                     {match.treeResults.map((mavo, idx) => (
-                                                        <RollingMarketCell key={mavo.id || idx} mavo={mavo} />
+                                                        <RollingMarketCell
+                                                            key={mavo.id || idx}
+                                                            mavo={mavo}
+                                                            match={match}
+                                                            onAddSlip={addToSlip}
+                                                        />
                                                     ))}
                                                 </div>
                                             ) : (
@@ -739,14 +946,16 @@ export default function SoccerEarlyMarketPage() {
                                                     gap: 12,
                                                 }}
                                             >
-                                                {MAIN_MARKET_KEYS.map(({ key, label }) => {
-                                                    const oddsObj = match?.odds?.[key];
+                                                {MAIN_MARKET_KEYS.map(({ key: mk, label }) => {
+                                                    const oddsObj = match?.odds?.[mk];
                                                     return (
                                                         <MarketOddsCell
-                                                            key={key}
-                                                            marketKey={key}
+                                                            key={mk}
+                                                            marketKey={mk}
                                                             label={label}
                                                             oddsObj={oddsObj}
+                                                            match={match}
+                                                            onAddSlip={addToSlip}
                                                         />
                                                     );
                                                 })}
@@ -777,6 +986,187 @@ export default function SoccerEarlyMarketPage() {
                             </div>
                         </div>
                     </div>
+
+                    {/* 右侧：投注单 + 确认 */}
+                    <div
+                        style={{
+                            background: "#fff",
+                            border: "1px solid #e5e7eb",
+                            borderRadius: 12,
+                            display: "flex",
+                            flexDirection: "column",
+                            minHeight: 0,
+                            overflow: "hidden",
+                        }}
+                    >
+                        <div style={{ padding: "12px 14px", borderBottom: "1px solid #e5e7eb", fontWeight: 700, fontSize: 15 }}>
+                            投注单
+                        </div>
+                        {!confirmStep ? (
+                            <>
+                                <div style={{ flex: 1, overflowY: "auto", padding: 10, minHeight: 0 }}>
+                                    {betSlip.length === 0 ? (
+                                        <div style={{ color: "#9ca3af", fontSize: 13 }}>点击左侧赔率加入</div>
+                                    ) : (
+                                        betSlip.map((item) => (
+                                            <div
+                                                key={item.key}
+                                                style={{
+                                                    marginBottom: 8,
+                                                    padding: 8,
+                                                    background: "#f9fafb",
+                                                    borderRadius: 8,
+                                                    fontSize: 12,
+                                                    display: "flex",
+                                                    justifyContent: "space-between",
+                                                    alignItems: "flex-start",
+                                                    gap: 6,
+                                                }}
+                                            >
+                                                <span style={{ flex: 1, wordBreak: "break-word" }}>{item.selectionText}</span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeFromSlip(item.key)}
+                                                    style={{ flexShrink: 0, padding: "2px 6px", fontSize: 11, cursor: "pointer", border: "1px solid #e5e7eb", borderRadius: 4 }}
+                                                >
+                                                    删除
+                                                </button>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                                {betSlip.length > 0 && (
+                                    <div style={{ padding: 12, borderTop: "1px solid #e5e7eb" }}>
+                                        <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>
+                                            共 {betSlip.length} 项 {betSlip.length > 1 ? ` · 串关赔率 ${parlayOdds.toFixed(2)}` : ` · 赔率 ${betSlip[0]?.odds}`}
+                                        </div>
+                                        <div style={{ marginBottom: 8 }}>
+                                            <label style={{ fontSize: 12, marginRight: 8 }}>
+                                                <input type="checkbox" checked={isBestOdd} onChange={(e) => setIsBestOdd(e.target.checked)} /> 接受更优赔率
+                                            </label>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setConfirmStep(true)}
+                                            style={{
+                                                width: "100%",
+                                                padding: "10px 16px",
+                                                background: "#111827",
+                                                color: "#fff",
+                                                border: "none",
+                                                borderRadius: 8,
+                                                fontWeight: 600,
+                                                cursor: "pointer",
+                                            }}
+                                        >
+                                            确认投注
+                                        </button>
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <div style={{ flex: 1, padding: 12, overflowY: "auto" }}>
+                                <div style={{ fontSize: 13, marginBottom: 10 }}>请确认投注内容并输入金额</div>
+                                {betSlip.map((item) => (
+                                    <div key={item.key} style={{ marginBottom: 6, fontSize: 12, color: "#374151" }}>
+                                        {item.selectionText}
+                                    </div>
+                                ))}
+                                <div style={{ marginTop: 12, marginBottom: 8 }}>
+                                    <label style={{ fontSize: 12 }}>投注金额</label>
+                                    <input
+                                        type="number"
+                                        min="1"
+                                        step="0.01"
+                                        value={betAmount}
+                                        onChange={(e) => setBetAmount(e.target.value)}
+                                        placeholder="请输入金额"
+                                        style={{ width: "100%", marginTop: 4, padding: "8px 10px", borderRadius: 8, border: "1px solid #d1d5db" }}
+                                    />
+                                </div>
+                                {submitError && <div style={{ color: "#dc2626", fontSize: 12, marginBottom: 8 }}>{submitError}</div>}
+                                <div style={{ display: "flex", gap: 8 }}>
+                                    <button
+                                        type="button"
+                                        onClick={() => { setConfirmStep(false); setSubmitError(""); }}
+                                        disabled={submitLoading}
+                                        style={{ flex: 1, padding: "10px", border: "1px solid #d1d5db", borderRadius: 8, background: "#fff", cursor: "pointer" }}
+                                    >
+                                        返回
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleSubmitOrder}
+                                        disabled={submitLoading}
+                                        style={{ flex: 1, padding: "10px", background: "#111827", color: "#fff", border: "none", borderRadius: 8, fontWeight: 600, cursor: "pointer" }}
+                                    >
+                                        {submitLoading ? "提交中..." : "提交"}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* 下方：订单列表 + 结算汇总 */}
+                <div style={{ flexShrink: 0, marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden" }}>
+                        <div style={{ padding: "12px 14px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontWeight: 700, fontSize: 15 }}>订单列表（未结算）</span>
+                            <button
+                                type="button"
+                                onClick={loadOrderList}
+                                disabled={orderListLoading}
+                                style={{ padding: "6px 12px", fontSize: 13, border: "1px solid #d1d5db", borderRadius: 8, background: "#fff", cursor: "pointer" }}
+                            >
+                                {orderListLoading ? "加载中..." : "刷新"}
+                            </button>
+                        </div>
+                        <div style={{ maxHeight: 280, overflowY: "auto", padding: 12 }}>
+                            {orderListLoading && orderList.length === 0 ? (
+                                <div style={{ color: "#9ca3af", textAlign: "center", padding: 24 }}>加载中...</div>
+                            ) : orderList.length === 0 ? (
+                                <div style={{ color: "#9ca3af", textAlign: "center", padding: 24 }}>暂无订单</div>
+                            ) : (
+                                orderList.map((order) => (
+                                    <div
+                                        key={order.orderId || order.createdTime}
+                                        style={{
+                                            border: "1px solid #e5e7eb",
+                                            borderRadius: 8,
+                                            padding: 10,
+                                            marginBottom: 8,
+                                            fontSize: 12,
+                                        }}
+                                    >
+                                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                                            <span>订单号: {order.orderId || order.contact || "-"}</span>
+                                            <span>金额: {order.betAmount} · 结算: {order.settlementAmount != null ? order.settlementAmount : "-"}</span>
+                                        </div>
+                                        {order.contactVO && order.contactVO.length > 0 ? (
+                                            order.contactVO.map((c, i) => (
+                                                <div key={i} style={{ color: "#6b7280", marginTop: 4 }}>
+                                                    {c.event?.homeNameCN} vs {c.event?.awayNameCN} {c.betPlayName} @{c.odds}
+                                                </div>
+                                            ))
+                                        ) : (
+                                            <div style={{ color: "#6b7280" }}>单笔</div>
+                                        )}
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                    {orderFlow && (
+                        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}>
+                            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>结算汇总</div>
+                            <div style={{ fontSize: 13, display: "flex", gap: 24, flexWrap: "wrap" }}>
+                                <span>总投注: {orderFlow.sumBetsAmount != null ? orderFlow.sumBetsAmount : "-"}</span>
+                                <span>总结算: {orderFlow.sumSettlementAmount != null ? orderFlow.sumSettlementAmount : "-"}</span>
+                                <span>有效金额: {orderFlow.sumEffectiveAmount != null ? orderFlow.sumEffectiveAmount : "-"}</span>
+                            </div>
+                        </div>
+                    )}
                 </div>
             </div>
     );

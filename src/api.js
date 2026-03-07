@@ -57,6 +57,77 @@ export async function getLeagueGroup({
     };
 }
 
+/** 请求时带 debug & userId，便于测试环境识别用户 */
+function authParams(userId) {
+    return { debug: true, userId: userId || "1000" };
+}
+
+/** 下单前拉取最新赔率 POST /soccer/event/new-odds */
+export async function newOdds({ baseUrl = DEFAULT_BASE_URL, userId, betOrderList = [], isBestOdd = false } = {}) {
+    const query = buildQuery(authParams(userId));
+    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/soccer/event/new-odds?${query}`;
+    const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ betOrderList, isBestOdd }),
+    });
+    if (!res.ok) throw new Error(`new-odds 失败 HTTP ${res.status}`);
+    const json = await res.json();
+    return { url, data: json };
+}
+
+/** 单笔下单 POST /order/add (form) */
+export async function createOrder({ baseUrl = DEFAULT_BASE_URL, userId, betOrder, isBestOdd = false } = {}) {
+    const params = new URLSearchParams(buildQuery(authParams(userId)));
+    if (betOrder) {
+        Object.entries(betOrder).forEach(([k, v]) => {
+            if (v !== undefined && v !== null && v !== "") params.append(k, String(v));
+        });
+        params.append("isBestOdd", isBestOdd ? "true" : "false");
+    }
+    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/order/add`;
+    const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params.toString(),
+    });
+    const json = await res.json();
+    return { url, data: json };
+}
+
+/** 串关下单 POST /order/contact/add */
+export async function createContactOrder({ baseUrl = DEFAULT_BASE_URL, userId, betOrderList = [], isBestOdd = false } = {}) {
+    const query = buildQuery(authParams(userId));
+    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/order/contact/add?${query}`;
+    const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ betOrderList, isBestOdd }),
+    });
+    const json = await res.json();
+    return { url, data: json };
+}
+
+/** 订单列表 GET /order/list  type=0 未结算  type=1 已结算(需传 day) */
+export async function getOrderList({ baseUrl = DEFAULT_BASE_URL, userId, type = 0, page = 1, size = 20, day } = {}) {
+    const q = buildQuery({ ...authParams(userId), type, page, size, day });
+    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/order/list?${q}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`order/list 失败 HTTP ${res.status}`);
+    const json = await res.json();
+    return { url, data: json };
+}
+
+/** 结算汇总 GET /order/flow */
+export async function getOrderFlow({ baseUrl = DEFAULT_BASE_URL, userId } = {}) {
+    const q = buildQuery(authParams(userId));
+    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/order/flow?${q}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`order/flow 失败 HTTP ${res.status}`);
+    const json = await res.json();
+    return { url, data: json };
+}
+
 export async function getBet365All({
                                        baseUrl = DEFAULT_BASE_URL,
                                        userId = 1000,
@@ -64,8 +135,8 @@ export async function getBet365All({
                                        leagueIds,
                                        daysOfTime = 1,
                                    } = {}) {
-    // 滚球时允许 leagueIds 为空字符串，表示查全部滚球；早盘必须传联赛 id
-    if (leagueIds == null) {
+    // 早盘、滚球都必须传 leagueIds 筛选，不传则后端返回空列表
+    if (leagueIds == null || leagueIds === "") {
         throw new Error("leagueIds 不能为空");
     }
 
