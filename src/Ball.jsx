@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useRef } from "react";
 import { getBet365All, getLeagueGroup } from "./api";
+import { useOddsSocket } from "./useOddsSocket";
 
 function getMatchListFromOddsResponse(raw, matchType) {
     // 尽量兼容不同返回结构
@@ -21,6 +22,44 @@ function getMatchListFromOddsResponse(raw, matchType) {
     if (Array.isArray(data?.events)) return data.events;
 
     return [];
+}
+
+/** 将 WS 推送的 MAVO 合并进 matchRaw：按 eventId 找到比赛，更新 treeResults 中同 id 的 MAVO */
+function mergeMavoIntoMatchRaw(prevRaw, mavo) {
+    if (!prevRaw || !mavo) return prevRaw;
+    const eventId = mavo.eventId != null ? String(mavo.eventId) : null;
+    if (eventId == null) return prevRaw;
+
+    const data = prevRaw?.data?.data ?? prevRaw?.data ?? prevRaw;
+    const inPlay = data?.inPlay;
+    if (!Array.isArray(inPlay)) return prevRaw;
+
+    const newInPlay = inPlay.map((group) => {
+        const value = group?.value;
+        if (!Array.isArray(value)) return group;
+        const newValue = value.map((match) => {
+            const mid = match?.id != null ? String(match.id) : match?.bet365Id != null ? String(match.bet365Id) : null;
+            if (mid !== eventId) return match;
+            const tree = Array.isArray(match.treeResults) ? [...match.treeResults] : [];
+            const idx = tree.findIndex((m) => (m?.id != null ? String(m.id) : null) === String(mavo.id));
+            if (idx >= 0) {
+                tree[idx] = mavo;
+            } else {
+                tree.push(mavo);
+            }
+            return { ...match, treeResults: tree };
+        });
+        return { ...group, value: newValue };
+    });
+
+    const newData = { ...data, inPlay: newInPlay };
+    if (prevRaw.data?.data) {
+        return { ...prevRaw, data: { ...prevRaw.data, data: newData } };
+    }
+    if (prevRaw.data) {
+        return { ...prevRaw, data: { ...prevRaw.data, ...newData } };
+    }
+    return { ...prevRaw, ...newData };
 }
 
 function getMatchKey(match, index) {
@@ -57,12 +96,14 @@ function getAwayName(match) {
     );
 }
 
+/** 比赛时间统一按新加坡时间展示 */
 function getMatchTime(match) {
     const t = match?.time ?? match?.matchTime ?? match?.startTime ?? match?.eventTime;
     if (t == null) return "-";
     const ts = typeof t === "number" ? t * (t < 1e10 ? 1000 : 1) : new Date(t).getTime();
     const d = new Date(ts);
     return d.toLocaleString("zh-CN", {
+        timeZone: "Asia/Singapore",
         month: "2-digit",
         day: "2-digit",
         hour: "2-digit",
@@ -85,9 +126,41 @@ const MAIN_MARKET_KEYS = [
     { key: "938_asian_handicap", label: "亚盘" },
     { key: "981_goals_over_under", label: "大小球" },
     { key: "10143_goal_line", label: "球半" },
+    { key: "43_correct_score", label: "波胆" },
     { key: "1579_half_time_result", label: "半场胜平负" },
     { key: "10257_half_time_double_chance", label: "半场双重机会" },
 ];
+
+/** 新加坡时间当天 0 点的毫秒时间戳 */
+function getStartOfDaySingapore(date) {
+    const f = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Singapore",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    });
+    const [y, m, d] = f.format(date).split("-").map(Number);
+    return Date.UTC(y, m - 1, d, -8, 0, 0);
+}
+
+function getDateTabLabel(dayIndex) {
+    if (dayIndex === 0) return "今日";
+    if (dayIndex === 1) return "明天";
+    if (dayIndex === 2) return "后天";
+    const start = getStartOfDaySingapore(new Date()) + dayIndex * 24 * 3600 * 1000;
+    const d = new Date(start);
+    return d.toLocaleDateString("zh-CN", {
+        timeZone: "Asia/Singapore",
+        month: "numeric",
+        day: "numeric",
+    });
+}
+
+// day = 新加坡“选中日”0 点的时间戳(ms)，与后端一致
+function getSelectedDayTimestamp(dayIndex) {
+    const now = new Date();
+    return getStartOfDaySingapore(now) + dayIndex * 24 * 3600 * 1000;
+}
 
 function MarketOddsCell({ marketKey, label, oddsObj }) {
     if (!oddsObj?.odds?.length) return null;
@@ -118,6 +191,41 @@ function MarketOddsCell({ marketKey, label, oddsObj }) {
     );
 }
 
+/** 滚球：单个玩法（MAVO）展示，co[].pa 为选项，na/pNa 名称，od 赔率，ha 盘口 */
+function RollingMarketCell({ mavo }) {
+    const options = mavo?.co?.flatMap((c) => c.pa || []) ?? [];
+    if (options.length === 0) return null;
+    const title = mavo.na || mavo.id || "";
+
+    return (
+        <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>{title}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {options.map((pa, i) => (
+                    <span
+                        key={pa.id || i}
+                        style={{
+                            fontSize: 13,
+                            padding: "4px 10px",
+                            background: "#f3f4f6",
+                            borderRadius: 6,
+                            color: "#111827",
+                        }}
+                    >
+                        {(pa.na != null && pa.na !== "") ? pa.na : (pa.pNa != null ? pa.pNa : "-")}
+                        {pa.ha != null && String(pa.ha).trim() !== "" && (
+                            <span style={{ color: "#6b7280", marginLeft: 4 }}>({pa.ha})</span>
+                        )}
+                        {pa.od != null && (
+                            <span style={{ marginLeft: 6, fontWeight: 600 }}>{pa.od}</span>
+                        )}
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 export default function SoccerEarlyMarketPage() {
     const [baseUrl, setBaseUrl] = useState("https://ball.skybit.shop");
     const [userId, setUserId] = useState("1000");
@@ -130,13 +238,36 @@ export default function SoccerEarlyMarketPage() {
     const [matchLoading, setMatchLoading] = useState(false);
     const [error, setError] = useState("");
 
-    const [leagueRaw, setLeagueRaw] = useState(null);
     const [matchRaw, setMatchRaw] = useState(null);
+
+    /** 赔率 WS 更新高亮：{ eventId, maId }，约 600ms 后清除 */
+    const [highlight, setHighlight] = useState(null);
+    const highlightTimerRef = useRef(null);
+
+    // 日期 Tab：0=今日，1..9=往后 9 天；请求用 day=选中日 0 点时间戳(ms)，与后端一致，避免时区错位
+    const [selectedDayIndex, setSelectedDayIndex] = useState(0);
+    const selectedDayTs = getSelectedDayTimestamp(selectedDayIndex);
 
     const matchList = useMemo(
         () => getMatchListFromOddsResponse(matchRaw, type),
         [matchRaw, type]
     );
+
+    const handleOddsUpdate = (mavo) => {
+        setMatchRaw((prev) => mergeMavoIntoMatchRaw(prev, mavo));
+        if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+        setHighlight({ eventId: mavo.eventId != null ? String(mavo.eventId) : null, maId: mavo.id });
+        highlightTimerRef.current = setTimeout(() => {
+            setHighlight(null);
+            highlightTimerRef.current = null;
+        }, 600);
+    };
+
+    const { connected: wsConnected } = useOddsSocket({
+        baseUrl,
+        enabled: type === "1",
+        onOddsUpdate: handleOddsUpdate,
+    });
 
     const loadLeagues = async () => {
         setError("");
@@ -149,26 +280,29 @@ export default function SoccerEarlyMarketPage() {
                 baseUrl,
                 userId,
                 type,
+                sportId: 1,
+                day: type === "1" ? undefined : selectedDayTs,
+                daysOfTime: type === "1" ? undefined : 1,
             });
 
             const list = Array.isArray(res?.data?.data) ? res.data.data : [];
-            setLeagueRaw(res);
             setLeagueList(list);
 
             if (list.length > 0) {
                 setSelectedLeague(list[0]);
+            } else if (type === "1") {
+                setSelectedLeague({ leagueId: "", leagueName: "全部" });
             }
         } catch (err) {
             setError(err.message || "获取联赛列表失败");
             setLeagueList([]);
-            setLeagueRaw(null);
         } finally {
             setLeagueLoading(false);
         }
     };
 
     const loadMatchesByLeague = async (league) => {
-        if (!league?.leagueId) return;
+        if (type !== "1" && !league?.leagueId) return;
 
         setError("");
         setSelectedLeague(league);
@@ -178,15 +312,17 @@ export default function SoccerEarlyMarketPage() {
             const res = await getBet365All({
                 baseUrl,
                 userId,
-                day: Date.now(),
-                leagueIds: league.leagueId,
+                day: type === "1" ? undefined : selectedDayTs,
+                leagueIds: league?.leagueId ?? "",
+                daysOfTime: type === "1" ? undefined : 1,
             });
 
             setMatchRaw({
                 request: {
-                    leagueName: league.leagueName,
-                    leagueId: league.leagueId,
-                    day: Date.now(),
+                    leagueName: league?.leagueName ?? "全部",
+                    leagueId: league?.leagueId ?? "",
+                    day: type === "1" ? undefined : selectedDayTs,
+                    daysOfTime: type === "1" ? undefined : 1,
                 },
                 ...res,
             });
@@ -198,40 +334,45 @@ export default function SoccerEarlyMarketPage() {
         }
     };
 
+    // 初始加载 + 切换日期/type 时刷新联赛列表
     useEffect(() => {
         loadLeagues();
-    }, []);
+    }, [selectedDayIndex, type]);
 
+    // 滚球时 selectedLeague 可为「全部」(leagueId="")，也要请求；早盘需 selectedLeague.leagueId
     useEffect(() => {
-        if (selectedLeague?.leagueId) {
+        if (type === "1" ? selectedLeague != null : selectedLeague?.leagueId) {
             loadMatchesByLeague(selectedLeague);
         }
-    }, [selectedLeague?.leagueId]);
+    }, [selectedLeague?.leagueId, selectedLeague?.leagueName, selectedDayTs, type]);
 
     return (
         <div
             style={{
-                minHeight: "100vh",
+                height: "100vh",
+                display: "flex",
+                flexDirection: "column",
                 background: "#f5f7fb",
-                padding: 20,
+                padding: 12,
                 color: "#111827",
                 fontFamily:
                     '-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif',
             }}
         >
-            <div style={{ maxWidth: 1480, margin: "0 auto" }}>
+            {/* 顶部：标题 + 接口配置，不占满宽 */}
+            <div style={{ flexShrink: 0, marginBottom: 12 }}>
                 <div
                     style={{
                         background: "#ffffff",
                         border: "1px solid #e5e7eb",
-                        borderRadius: 16,
-                        padding: 18,
-                        marginBottom: 16,
+                        borderRadius: 12,
+                        padding: "12px 16px",
+                        marginBottom: 12,
                     }}
                 >
-                    <div style={{ fontSize: 24, fontWeight: 700 }}>足球早盘 / 比赛列表</div>
-                    <div style={{ fontSize: 13, color: "#6b7280", marginTop: 6 }}>
-                        左侧联赛，右侧比赛列表。当前点击联赛后自动请求 bet365/all。
+                    <div style={{ fontSize: 18, fontWeight: 700 }}>足球早盘 / 比赛列表</div>
+                    <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>
+                        左侧联赛，右侧比赛列表。点击联赛后自动请求 bet365/all。
                     </div>
                 </div>
 
@@ -242,9 +383,8 @@ export default function SoccerEarlyMarketPage() {
                         gap: 12,
                         background: "#fff",
                         border: "1px solid #e5e7eb",
-                        borderRadius: 16,
-                        padding: 16,
-                        marginBottom: 16,
+                        borderRadius: 12,
+                        padding: 12,
                     }}
                 >
                     <div>
@@ -316,6 +456,7 @@ export default function SoccerEarlyMarketPage() {
                         </button>
                     </div>
                 </div>
+            </div>
 
                 {error ? (
                     <div
@@ -332,33 +473,42 @@ export default function SoccerEarlyMarketPage() {
                     </div>
                 ) : null}
 
-                <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 16 }}>
+                {/* 联赛列表 + 比赛列表：占满剩余高度，左对齐 */}
+                <div
+                    style={{
+                        display: "grid",
+                        gridTemplateColumns: "280px 1fr",
+                        gap: 12,
+                        flex: 1,
+                        minHeight: 0,
+                        alignContent: "stretch",
+                    }}
+                >
                     <div
                         style={{
                             background: "#fff",
                             border: "1px solid #e5e7eb",
-                            borderRadius: 16,
+                            borderRadius: 12,
                             overflow: "hidden",
+                            display: "flex",
+                            flexDirection: "column",
+                            minHeight: 0,
                         }}
                     >
                         <div
                             style={{
-                                padding: 16,
+                                padding: "12px 14px",
                                 borderBottom: "1px solid #e5e7eb",
-                                display: "flex",
-                                justifyContent: "space-between",
-                                alignItems: "center",
+                                flexShrink: 0,
                             }}
                         >
-                            <div>
-                                <div style={{ fontWeight: 700 }}>联赛列表</div>
-                                <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>
-                                    共 {leagueList.length} 条
-                                </div>
+                            <div style={{ fontWeight: 700, fontSize: 15 }}>联赛列表</div>
+                            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+                                共 {leagueList.length} 条
                             </div>
                         </div>
 
-                        <div style={{ padding: 12, maxHeight: 760, overflowY: "auto" }}>
+                        <div style={{ flex: 1, overflowY: "auto", padding: 10, minHeight: 0 }}>
                             {leagueList.length === 0 ? (
                                 <div
                                     style={{
@@ -374,15 +524,14 @@ export default function SoccerEarlyMarketPage() {
                             ) : (
                                 leagueList.map((league) => {
                                     const active = selectedLeague?.leagueId === league.leagueId;
-
                                     return (
                                         <div
                                             key={league.leagueId}
-                                            onClick={() => loadMatchesByLeague(league)}
+                                            onClick={() => setSelectedLeague(league)}
                                             style={{
-                                                marginBottom: 10,
-                                                padding: 14,
-                                                borderRadius: 12,
+                                                marginBottom: 8,
+                                                padding: "10px 12px",
+                                                borderRadius: 10,
                                                 cursor: "pointer",
                                                 border: active ? "1px solid #111827" : "1px solid #e5e7eb",
                                                 background: active ? "#111827" : "#fff",
@@ -390,11 +539,11 @@ export default function SoccerEarlyMarketPage() {
                                                 transition: "all 0.2s ease",
                                             }}
                                         >
-                                            <div style={{ fontWeight: 600, lineHeight: 1.4 }}>{league.leagueName}</div>
-                                            <div style={{ fontSize: 12, marginTop: 8, opacity: 0.85 }}>
+                                            <div style={{ fontWeight: 600, lineHeight: 1.35, fontSize: 14 }}>{league.leagueName}</div>
+                                            <div style={{ fontSize: 11, marginTop: 4, opacity: 0.85 }}>
                                                 leagueId: {league.leagueId}
                                             </div>
-                                            <div style={{ fontSize: 12, marginTop: 4, opacity: 0.85 }}>
+                                            <div style={{ fontSize: 11, marginTop: 2, opacity: 0.85 }}>
                                                 sportId: {league.sportId} / type: {league.type}
                                             </div>
                                         </div>
@@ -404,30 +553,47 @@ export default function SoccerEarlyMarketPage() {
                         </div>
                     </div>
 
-                    <div style={{ display: "grid", gridTemplateRows: "1fr 320px", gap: 16 }}>
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            minHeight: 0,
+                            flex: 1,
+                        }}
+                    >
                         <div
                             style={{
                                 background: "#fff",
                                 border: "1px solid #e5e7eb",
-                                borderRadius: 16,
+                                borderRadius: 12,
                                 overflow: "hidden",
+                                display: "flex",
+                                flexDirection: "column",
+                                flex: 1,
+                                minHeight: 0,
                             }}
                         >
                             <div
                                 style={{
-                                    padding: 16,
+                                    padding: "12px 14px",
                                     borderBottom: "1px solid #e5e7eb",
                                     display: "flex",
                                     justifyContent: "space-between",
                                     alignItems: "center",
+                                    flexShrink: 0,
                                 }}
                             >
                                 <div>
-                                    <div style={{ fontWeight: 700 }}>比赛列表</div>
-                                    <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>
+                                    <div style={{ fontWeight: 700, fontSize: 15 }}>比赛列表</div>
+                                    <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
                                         {selectedLeague
                                             ? `${selectedLeague.leagueName}（${selectedLeague.leagueId}）`
                                             : "请选择联赛"}
+                                        {type === "1" && (
+                                            <span style={{ marginLeft: 8, color: wsConnected ? "#059669" : "#9ca3af" }}>
+                                                · 赔率 WS: {wsConnected ? "已连接" : "连接中…"}
+                                            </span>
+                                        )}
                                     </div>
                                 </div>
 
@@ -435,12 +601,13 @@ export default function SoccerEarlyMarketPage() {
                                     <button
                                         onClick={() => loadMatchesByLeague(selectedLeague)}
                                         style={{
-                                            height: 36,
-                                            padding: "0 14px",
+                                            height: 34,
+                                            padding: "0 12px",
                                             border: "1px solid #d1d5db",
-                                            borderRadius: 10,
+                                            borderRadius: 8,
                                             background: "#fff",
                                             cursor: "pointer",
+                                            fontSize: 13,
                                         }}
                                     >
                                         {matchLoading ? "刷新中..." : "刷新比赛"}
@@ -448,7 +615,44 @@ export default function SoccerEarlyMarketPage() {
                                 ) : null}
                             </div>
 
-                            <div style={{ padding: 16, maxHeight: 520, overflowY: "auto" }}>
+                            {/* 日期 Tab：仅早盘时显示，滚球时不显示 */}
+                            {type !== "1" && (
+                            <div
+                                style={{
+                                    borderBottom: "1px solid #e5e7eb",
+                                    padding: "10px 14px",
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: 8,
+                                    flexShrink: 0,
+                                }}
+                            >
+                                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((dayIndex) => {
+                                    const active = selectedDayIndex === dayIndex;
+                                    return (
+                                        <button
+                                            key={dayIndex}
+                                            type="button"
+                                            onClick={() => setSelectedDayIndex(dayIndex)}
+                                            style={{
+                                                padding: "8px 14px",
+                                                borderRadius: 10,
+                                                border: active ? "1px solid #111827" : "1px solid #e5e7eb",
+                                                background: active ? "#111827" : "#fff",
+                                                color: active ? "#fff" : "#111827",
+                                                fontSize: 13,
+                                                fontWeight: 500,
+                                                cursor: "pointer",
+                                            }}
+                                        >
+                                            {getDateTabLabel(dayIndex)}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                            )}
+
+                            <div style={{ flex: 1, overflowY: "auto", padding: 12, minHeight: 0 }}>
                                 {matchLoading ? (
                                     <div
                                         style={{
@@ -467,9 +671,9 @@ export default function SoccerEarlyMarketPage() {
                                             key={getMatchKey(match, index)}
                                             style={{
                                                 border: "1px solid #e5e7eb",
-                                                borderRadius: 14,
-                                                padding: 16,
-                                                marginBottom: 16,
+                                                borderRadius: 10,
+                                                padding: 12,
+                                                marginBottom: 10,
                                                 background: "#fff",
                                             }}
                                         >
@@ -478,13 +682,13 @@ export default function SoccerEarlyMarketPage() {
                                                     display: "flex",
                                                     justifyContent: "space-between",
                                                     alignItems: "center",
-                                                    marginBottom: 12,
-                                                    paddingBottom: 10,
+                                                    marginBottom: 8,
+                                                    paddingBottom: 8,
                                                     borderBottom: "1px solid #e5e7eb",
                                                 }}
                                             >
                                                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                                                    <div style={{ fontSize: 15, fontWeight: 700, lineHeight: 1.4 }}>
+                                                    <div style={{ fontSize: 14, fontWeight: 700, lineHeight: 1.35 }}>
                                                         {getHomeName(match)} VS {getAwayName(match)}
                                                     </div>
                                                     {match?.timeStatus === "1" && (
@@ -503,8 +707,8 @@ export default function SoccerEarlyMarketPage() {
                                                     )}
                                                 </div>
                                                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                                                    {match?.timeStatus === "1" && getScore(match) !== "-" && (
-                                                        <span style={{ fontSize: 13, color: "#059669", fontWeight: 600 }}>
+                                                    {(match?.timeStatus === "1" || match?.ballScore) && getScore(match) !== "-" && (
+                                                        <span style={{ fontSize: 15, color: "#059669", fontWeight: 700 }}>
                                                             {getScore(match)}
                                                         </span>
                                                     )}
@@ -514,11 +718,25 @@ export default function SoccerEarlyMarketPage() {
                                                 </div>
                                             </div>
 
+                                            {match?.timeStatus === "1" && Array.isArray(match?.treeResults) && match.treeResults.length > 0 ? (
+                                                <div
+                                                    className={highlight && String(match?.id) === String(highlight.eventId) ? "odds-updated-flash" : ""}
+                                                    style={{
+                                                        display: "grid",
+                                                        gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+                                                        gap: 12,
+                                                    }}
+                                                >
+                                                    {match.treeResults.map((mavo, idx) => (
+                                                        <RollingMarketCell key={mavo.id || idx} mavo={mavo} />
+                                                    ))}
+                                                </div>
+                                            ) : (
                                             <div
                                                 style={{
                                                     display: "grid",
-                                                    gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
-                                                    gap: 16,
+                                                    gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))",
+                                                    gap: 12,
                                                 }}
                                             >
                                                 {MAIN_MARKET_KEYS.map(({ key, label }) => {
@@ -533,9 +751,10 @@ export default function SoccerEarlyMarketPage() {
                                                     );
                                                 })}
                                             </div>
+                                            )}
 
                                             {match?.id != null && (
-                                                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 10 }}>
+                                                <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 6 }}>
                                                     ID: {match.id}
                                                     {match.bet365Id != null && ` · bet365: ${match.bet365Id}`}
                                                 </div>
@@ -557,68 +776,8 @@ export default function SoccerEarlyMarketPage() {
                                 )}
                             </div>
                         </div>
-
-                        <div
-                            style={{
-                                background: "#fff",
-                                border: "1px solid #e5e7eb",
-                                borderRadius: 16,
-                                overflow: "hidden",
-                            }}
-                        >
-                            <div
-                                style={{
-                                    padding: 16,
-                                    borderBottom: "1px solid #e5e7eb",
-                                    fontWeight: 700,
-                                }}
-                            >
-                                原始返回数据
-                            </div>
-
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0, height: "100%" }}>
-                                <div style={{ borderRight: "1px solid #e5e7eb", padding: 16 }}>
-                                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>联赛接口</div>
-                                    <pre
-                                        style={{
-                                            margin: 0,
-                                            background: "#0f172a",
-                                            color: "#e2e8f0",
-                                            borderRadius: 12,
-                                            padding: 12,
-                                            overflow: "auto",
-                                            height: 220,
-                                            fontSize: 12,
-                                            lineHeight: 1.5,
-                                        }}
-                                    >
-                    {JSON.stringify(leagueRaw, null, 2)}
-                  </pre>
-                                </div>
-
-                                <div style={{ padding: 16 }}>
-                                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>比赛接口</div>
-                                    <pre
-                                        style={{
-                                            margin: 0,
-                                            background: "#0f172a",
-                                            color: "#e2e8f0",
-                                            borderRadius: 12,
-                                            padding: 12,
-                                            overflow: "auto",
-                                            height: 220,
-                                            fontSize: 12,
-                                            lineHeight: 1.5,
-                                        }}
-                                    >
-                    {JSON.stringify(matchRaw, null, 2)}
-                  </pre>
-                                </div>
-                            </div>
-                        </div>
                     </div>
                 </div>
             </div>
-        </div>
     );
 }
