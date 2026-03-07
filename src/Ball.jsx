@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState, useRef, useCallback } from "react";
-import { getBet365All, getLeagueGroup, createOrder, createContactOrder, getOrderList, getOrderFlow } from "./api";
+import { getBet365All, getLeagueGroup, getAssociation, createOrder, createContactOrder, getOrderList, getOrderFlow } from "./api";
 import { useOddsSocket } from "./useOddsSocket";
 
 function getMatchListFromOddsResponse(raw, matchType) {
@@ -188,8 +188,8 @@ function MarketOddsCell({ marketKey, label, oddsObj, match, onAddSlip }) {
                         key={item.id || i}
                         role="button"
                         tabIndex={0}
-                        onClick={() => onAddSlip?.({ type: "pre", match, marketKey, label: label || oddsObj.name, item, betPlayId, betPlayName, bigTypeName })}
-                        onKeyDown={(e) => e.key === "Enter" && onAddSlip?.({ type: "pre", match, marketKey, label: label || oddsObj.name, item, betPlayId, betPlayName, bigTypeName })}
+                        onClick={() => onAddSlip?.({ type: "pre", match, marketKey, label: label || oddsObj.name, item, oddsObj, betPlayId, betPlayName, bigTypeName })}
+                        onKeyDown={(e) => e.key === "Enter" && onAddSlip?.({ type: "pre", match, marketKey, label: label || oddsObj.name, item, oddsObj, betPlayId, betPlayName, bigTypeName })}
                         style={{
                             fontSize: 13,
                             padding: "4px 10px",
@@ -285,7 +285,32 @@ export default function SoccerEarlyMarketPage() {
     const [orderFlow, setOrderFlow] = useState(null);
     const slipKeyRef = useRef(0);
 
-    // 日期 Tab：0=今日，1..9=往后 9 天；请求用 day=选中日 0 点时间戳(ms)，与后端一致，避免时区错位
+    /** 玩法集合：type=1 早盘 type=5 滚球 type=6 其他；按 type -> smallId -> { betName, samllName, smallId } */
+    const [associationList, setAssociationList] = useState([]);
+    const associationMap = useMemo(() => {
+        const map = new Map();
+        const list = Array.isArray(associationList) ? associationList : [];
+        list.forEach((vo) => {
+            const t = vo.type != null ? Number(vo.type) : null;
+            if (t == null) return;
+            const arr = vo.value;
+            if (!Array.isArray(arr)) return;
+            const bySmall = new Map();
+            arr.forEach((item) => {
+                const sid = item.smallId != null ? item.smallId : item.small_id;
+                if (sid == null) return;
+                bySmall.set(String(sid), {
+                    betName: item.betName ?? item.bet_name ?? "",
+                    samllName: item.samllName ?? item.samll_name ?? item.small_name ?? "",
+                    smallId: sid,
+                });
+            });
+            map.set(t, bySmall);
+        });
+        return map;
+    }, [associationList]);
+
+    // 日期 Tab：0=今日，1..9=往后 9 天
     const [selectedDayIndex, setSelectedDayIndex] = useState(0);
     const selectedDayTs = getSelectedDayTimestamp(selectedDayIndex);
 
@@ -380,6 +405,22 @@ export default function SoccerEarlyMarketPage() {
         loadLeagues();
     }, [selectedDayIndex, type]);
 
+    /** 赔率界面先请求玩法集合（association），再请求联赛/比赛 */
+    const loadAssociation = useCallback(async () => {
+        if (!baseUrl) return;
+        try {
+            const res = await getAssociation({ baseUrl, userId });
+            const list = res?.data?.data ?? res?.data ?? [];
+            setAssociationList(Array.isArray(list) ? list : []);
+        } catch {
+            setAssociationList([]);
+        }
+    }, [baseUrl, userId]);
+
+    useEffect(() => {
+        loadAssociation();
+    }, [loadAssociation]);
+
     // 早盘、滚球均需选中联赛（leagueId）后才请求比赛列表；未选中则清空列表
     useEffect(() => {
         if (selectedLeague?.leagueId) {
@@ -391,9 +432,19 @@ export default function SoccerEarlyMarketPage() {
 
     const addToSlip = useCallback((payload) => {
         if (payload.type === "pre") {
-            const { match, marketKey, label, item, betPlayId, betPlayName, bigTypeName } = payload;
+            const { match, marketKey, label, item, oddsObj, betPlayName: _bpName } = payload;
             const odds = parseFloat(item.odds);
             if (!Number.isFinite(odds) || !match?.id) return;
+            // 赔率里的 at_time：早盘用 oddsObj 的 updateAt 或 at_time
+            const atTime = oddsObj?.updateAt ?? oddsObj?.at_time ?? item?.updateAt ?? item?.at_time ?? null;
+            const timeStr = atTime != null ? String(atTime) : "";
+            // 用赔率玩法 id（如 marketKey 的 938、10257）去 association 里查，不是选项 id(item.id)
+            const playSmallId = marketKey ? String(marketKey.split("_")[0]) : "";
+            const assocByType = associationMap.get(1);
+            const assoc = assocByType && playSmallId ? assocByType.get(playSmallId) : null;
+            const bigTypeName = assoc?.betName ?? "";
+            const betPlayName = assoc?.samllName ?? _bpName ?? (marketKey ? marketKey.split("_").slice(1).join("_") : "");
+            const betPlayId = assoc != null ? String(assoc.smallId) : playSmallId;
             setBetSlip((prev) => [
                 ...prev,
                 {
@@ -413,12 +464,24 @@ export default function SoccerEarlyMarketPage() {
                     betPlayName,
                     bigTypeName,
                     oddsMarkets: marketKey,
+                    at_time: atTime,
+                    timeStr,
                     selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${label} ${item.name != null ? item.name : item.handicap} @${item.odds}`,
                 },
             ]);
         } else {
             const { match, mavo, pa, odDecimal } = payload;
             if (!match?.id || !pa?.id || odDecimal == null) return;
+            // 滚球：赔率里的 at_time 用 mavo.updateAt；timeStr 与 time 同一值
+            const atTime = mavo?.updateAt ?? null;
+            const timeStr = atTime != null ? String(atTime) : "";
+            // 滚球：用玩法 id（mavo.id，类似早盘的 938）去 association 里查，不是选项 id(pa.id)
+            const playSmallId = mavo?.id != null ? String(mavo.id) : "";
+            const assocByType = associationMap.get(5);
+            const assoc = assocByType && playSmallId ? assocByType.get(playSmallId) : null;
+            const bigTypeName = assoc?.betName ?? "";
+            const betPlayName = assoc?.samllName ?? "";
+            const betPlayId = assoc != null ? String(assoc.smallId) : playSmallId;
             setBetSlip((prev) => [
                 ...prev,
                 {
@@ -435,14 +498,16 @@ export default function SoccerEarlyMarketPage() {
                     handicap: pa.ha != null ? String(pa.ha) : "",
                     odds: odDecimal,
                     oddsMarkets: "inplay",
-                    betPlayId: "",
-                    betPlayName: "",
-                    bigTypeName: "",
+                    betPlayId,
+                    betPlayName,
+                    bigTypeName,
+                    at_time: atTime,
+                    timeStr,
                     selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${mavo?.na || ""} ${(pa.na || pa.pNa) || ""} @${pa.od}`,
                 },
             ]);
         }
-    }, []);
+    }, [associationMap]);
 
     const removeFromSlip = (key) => setBetSlip((prev) => prev.filter((x) => x.key !== key));
 
@@ -458,6 +523,9 @@ export default function SoccerEarlyMarketPage() {
             betPlayId: item.betPlayId ?? "",
             betPlayName: item.betPlayName ?? "",
             bigTypeName: item.bigTypeName ?? "",
+            // 下单接口 time/timeStr 用赔率里的 at_time，timeStr 与 time 同一值
+            time: item.at_time ?? undefined,
+            timeStr: item.timeStr ?? (item.at_time != null ? String(item.at_time) : ""),
         };
         if (item.type === "inplay") base.paId = item.paId ?? "";
         return base;
@@ -514,7 +582,7 @@ export default function SoccerEarlyMarketPage() {
                 const res = await createOrder({
                     baseUrl,
                     userId,
-                    betOrder: { ...betOrderList[0], betAmount: amount },
+                    betOrder: { ...betOrderList[0] },
                     isBestOdd: isBestOdd,
                 });
                 if (res?.data?.code !== 0 && res?.data?.code !== undefined) {

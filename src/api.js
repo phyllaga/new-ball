@@ -62,6 +62,16 @@ function authParams(userId) {
     return { debug: true, userId: userId || "1000" };
 }
 
+/** 玩法集合：下单时 bigTypeName=bet_name, betPlayName=small_name, betPlayId=small_id；type=1 早盘 type=5 滚球 type=6 其他 */
+export async function getAssociation({ baseUrl = DEFAULT_BASE_URL, userId } = {}) {
+    const query = buildQuery(authParams(userId));
+    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/soccer/event/association?${query}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`association 失败 HTTP ${res.status}`);
+    const json = await res.json();
+    return { url, data: json };
+}
+
 /** 下单前拉取最新赔率 POST /soccer/event/new-odds */
 export async function newOdds({ baseUrl = DEFAULT_BASE_URL, userId, betOrderList = [], isBestOdd = false } = {}) {
     const query = buildQuery(authParams(userId));
@@ -81,7 +91,8 @@ export async function createOrder({ baseUrl = DEFAULT_BASE_URL, userId, betOrder
     const params = new URLSearchParams(buildQuery(authParams(userId)));
     if (betOrder) {
         Object.entries(betOrder).forEach(([k, v]) => {
-            if (v !== undefined && v !== null && v !== "") params.append(k, String(v));
+            if (v === undefined || v === null) return;
+            params.append(k, String(v));
         });
         params.append("isBestOdd", isBestOdd ? "true" : "false");
     }
