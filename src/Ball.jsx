@@ -619,7 +619,7 @@ export default function SoccerEarlyMarketPage() {
     return (
         <div
             style={{
-                height: "100vh",
+                minHeight: "100vh",
                 display: "flex",
                 flexDirection: "column",
                 background: "#f5f7fb",
@@ -743,14 +743,14 @@ export default function SoccerEarlyMarketPage() {
                     </div>
                 ) : null}
 
-                {/* 联赛 + 比赛列表 + 右侧投注单 */}
+                {/* 联赛 + 比赛列表 + 右侧投注单：高度拉大约三倍 */}
                 <div
                     style={{
                         display: "grid",
                         gridTemplateColumns: "280px 1fr 320px",
                         gap: 12,
                         flex: 1,
-                        minHeight: 0,
+                        minHeight: "calc(3 * (100vh - 240px))",
                         alignContent: "stretch",
                     }}
                 >
