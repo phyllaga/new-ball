@@ -508,9 +508,19 @@ export default function SoccerEarlyMarketPage() {
     const highlightTimerRef = useRef(null);
     const mergeTimerRef = useRef(null);
 
-    /** WS 赔率推送控制台：最近 N 条，用于调试。每项 { id, ts, eventId, maId, maName, summary, changedPaIds, oddsUnchanged, mergeSuccess } */
+    /** WS 推送控制台：最近 N 条。每项 { id, ts, type, ... }，type 为 in_play_odds_update | inplay_league | league */
     const [wsOddsConsoleLog, setWsOddsConsoleLog] = useState([]);
     const WS_CONSOLE_MAX = 30;
+    /** 控制台筛选项：topic（in_play_odds_update / inplay_league / league）、eventId（主要筛滚球赔率） */
+    const [wsConsoleFilterTopic, setWsConsoleFilterTopic] = useState("");
+    const [wsConsoleFilterEventId, setWsConsoleFilterEventId] = useState("");
+    const wsConsoleIdRef = useRef(0);
+    /** 向控制台插入一条（新条在最前，用自增 id 保证时间顺序） */
+    const pushWsConsole = useCallback((entry) => {
+        const id = ++wsConsoleIdRef.current;
+        const ts = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+        setWsOddsConsoleLog((log) => [{ id, ts, ...entry }, ...log.slice(0, WS_CONSOLE_MAX - 1)]);
+    }, []);
     /** 去重：避免同一条 WS 消息被处理两次（如 Strict Mode 双连接）导致控制台显示两条 */
     const lastProcessedRef = useRef({ key: "", ts: 0 });
 
@@ -606,20 +616,16 @@ export default function SoccerEarlyMarketPage() {
                 .slice(0, 8)
                 .map((pa) => pa?.od ?? pa?.OD ?? "-");
             const summary = oddsStrs.length > 0 ? oddsStrs.join("|") : "-";
-            setWsOddsConsoleLog((log) => [
-                {
-                    id: Date.now(),
-                    ts: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
-                    eventId: normalized.eventId != null ? String(normalized.eventId) : null,
-                    maId: normalized.id != null ? String(normalized.id) : "-",
-                    maName: normalized.na ?? normalized.NA ?? "-",
-                    summary: summary,
-                    changedPaIds: changedPaIds.slice(),
-                    oddsUnchanged: changedPaIds.length === 0,
-                    mergeSuccess: true,
-                },
-                ...log.slice(0, WS_CONSOLE_MAX - 1),
-            ]);
+            pushWsConsole({
+                type: "in_play_odds_update",
+                eventId: normalized.eventId != null ? String(normalized.eventId) : null,
+                maId: normalized.id != null ? String(normalized.id) : "-",
+                maName: normalized.na ?? normalized.NA ?? "-",
+                summary,
+                changedPaIds: changedPaIds.slice(),
+                oddsUnchanged: changedPaIds.length === 0,
+                mergeSuccess: true,
+            });
 
             return changedPaIds.length > 0 ? prev : merged;
         });
@@ -641,14 +647,17 @@ export default function SoccerEarlyMarketPage() {
         onInplayLeagueUpdate: (data) => {
             const list = Array.isArray(data) ? data : (data?.data ?? []);
             setLeagueList(Array.isArray(list) ? list : []);
+            pushWsConsole({ type: "inplay_league", count: Array.isArray(list) ? list.length : 0 });
         },
         onLeagueEventsUpdate: (data) => {
             const leagueId = data?.leagueId != null ? String(data.leagueId) : null;
             if (leagueId == null) return;
+            const inPlay = data?.data?.inPlay ?? data?.inPlay;
+            const matchCount = Array.isArray(inPlay) ? (inPlay.reduce((acc, g) => acc + (Array.isArray(g?.value) ? g.value.length : 0), 0)) : 0;
+            pushWsConsole({ type: "league", leagueId, matchCount });
             if (String(selectedLeagueRef.current?.leagueId) !== leagueId) return;
             setMatchRaw((prev) => {
                 if (!prev) return prev;
-                const inPlay = data?.data?.inPlay ?? data?.inPlay;
                 const nextData = Array.isArray(inPlay) ? { inPlay } : data?.data ?? (data?.inPlay != null ? { inPlay: data.inPlay } : null);
                 if (!nextData || typeof nextData !== "object") return prev;
                 return { ...prev, data: nextData };
@@ -1506,23 +1515,56 @@ export default function SoccerEarlyMarketPage() {
                         {/* 滚球时：WS 赔率推送控制台 */}
                         {type === "1" && (
                             <div style={{ borderTop: "1px solid #e5e7eb", padding: 10, background: "#f9fafb", maxHeight: 320, overflow: "auto" }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                                    <span style={{ fontWeight: 600, fontSize: 13, color: "#374151" }}>WS 赔率推送</span>
-                                    <button
-                                        type="button"
-                                        onClick={() => setWsOddsConsoleLog([])}
-                                        style={{ padding: "4px 10px", fontSize: 12, border: "1px solid #d1d5db", borderRadius: 6, background: "#fff", cursor: "pointer", color: "#6b7280" }}
-                                    >
-                                        清除
-                                    </button>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
+                                    <span style={{ fontWeight: 600, fontSize: 13, color: "#374151" }}>WS 推送</span>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                                        <label style={{ fontSize: 12, color: "#6b7280" }}>
+                                            topic
+                                            <select
+                                                value={wsConsoleFilterTopic}
+                                                onChange={(e) => setWsConsoleFilterTopic(e.target.value)}
+                                                style={{ marginLeft: 4, padding: "4px 8px", fontSize: 12, border: "1px solid #d1d5db", borderRadius: 6 }}
+                                            >
+                                                <option value="">全部</option>
+                                                <option value="in_play_odds_update">in_play_odds_update</option>
+                                                <option value="inplay_league">inplay_league</option>
+                                                <option value="league">league</option>
+                                            </select>
+                                        </label>
+                                        <label style={{ fontSize: 12, color: "#6b7280" }}>
+                                            eventId
+                                            <input
+                                                type="text"
+                                                value={wsConsoleFilterEventId}
+                                                onChange={(e) => setWsConsoleFilterEventId(e.target.value)}
+                                                placeholder="筛滚球赔率"
+                                                style={{ marginLeft: 4, padding: "4px 8px", fontSize: 12, width: 100, border: "1px solid #d1d5db", borderRadius: 6 }}
+                                            />
+                                        </label>
+                                        <button
+                                            type="button"
+                                            onClick={() => setWsOddsConsoleLog([])}
+                                            style={{ padding: "4px 10px", fontSize: 12, border: "1px solid #d1d5db", borderRadius: 6, background: "#fff", cursor: "pointer", color: "#6b7280" }}
+                                        >
+                                            清除
+                                        </button>
+                                    </div>
                                 </div>
-                                {wsOddsConsoleLog.length === 0 ? (
-                                    <div style={{ fontSize: 12, color: "#9ca3af" }}>暂无推送记录，连接后收到推送会在此显示</div>
-                                ) : (
-                                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                                        {[...wsOddsConsoleLog]
-                                            .sort((a, b) => (b.id - a.id))
-                                            .map((entry) => (
+                                {(() => {
+                                    const topicOk = (entry) => !wsConsoleFilterTopic || entry.type === wsConsoleFilterTopic;
+                                    const eventIdOk = (entry) => {
+                                        if (!wsConsoleFilterEventId.trim()) return true;
+                                        const id = entry.eventId != null ? String(entry.eventId) : "";
+                                        return id.includes(wsConsoleFilterEventId.trim());
+                                    };
+                                    const filtered = wsOddsConsoleLog.filter((e) => topicOk(e) && eventIdOk(e));
+                                    return filtered.length === 0 ? (
+                                        <div style={{ fontSize: 12, color: "#9ca3af" }}>
+                                            {wsOddsConsoleLog.length === 0 ? "暂无推送记录，连接后收到推送会在此显示" : "无符合筛选条件的记录"}
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                            {filtered.map((entry) => (
                                             <div
                                                 key={entry.id}
                                                 style={{
@@ -1534,23 +1576,38 @@ export default function SoccerEarlyMarketPage() {
                                                     fontFamily: "monospace",
                                                 }}
                                             >
-                                                <div style={{ marginBottom: 4, color: "#6b7280" }}>
-                                                    [{entry.ts}] eventId={entry.eventId} maId={entry.maId} {entry.maName}
-                                                </div>
-                                                <div style={{ marginBottom: 4, wordBreak: "break-all" }}>{entry.summary}</div>
-                                                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-                                                    <span style={{ color: entry.oddsUnchanged ? "#059669" : "#d97706", fontWeight: 600 }}>
-                                                        {entry.oddsUnchanged ? "与之前一致" : "有变化"}
-                                                        {entry.changedPaIds.length > 0 && ` (${entry.changedPaIds.length} 项)`}
-                                                    </span>
-                                                    <span style={{ color: entry.mergeSuccess ? "#059669" : "#dc2626" }}>
-                                                        {entry.mergeSuccess ? "修改成功" : "修改失败"}
-                                                    </span>
-                                                </div>
+                                                {entry.type === "inplay_league" ? (
+                                                    <>
+                                                        <div style={{ marginBottom: 4, color: "#6b7280" }}>[{entry.ts}] 滚球联赛列表</div>
+                                                        <div style={{ color: "#059669" }}>更新 {entry.count ?? 0} 个联赛</div>
+                                                    </>
+                                                ) : entry.type === "league" ? (
+                                                    <>
+                                                        <div style={{ marginBottom: 4, color: "#6b7280" }}>[{entry.ts}] 联赛赛事列表</div>
+                                                        <div style={{ color: "#059669" }}>leagueId={entry.leagueId} 更新 {entry.matchCount ?? 0} 场</div>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <div style={{ marginBottom: 4, color: "#6b7280" }}>
+                                                            [{entry.ts}] eventId={entry.eventId} maId={entry.maId} {entry.maName}
+                                                        </div>
+                                                        <div style={{ marginBottom: 4, wordBreak: "break-all" }}>{entry.summary}</div>
+                                                        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                                                            <span style={{ color: entry.oddsUnchanged ? "#059669" : "#d97706", fontWeight: 600 }}>
+                                                                {entry.oddsUnchanged ? "与之前一致" : "有变化"}
+                                                                {(entry.changedPaIds?.length ?? 0) > 0 && ` (${entry.changedPaIds.length} 项)`}
+                                                            </span>
+                                                            <span style={{ color: entry.mergeSuccess ? "#059669" : "#dc2626" }}>
+                                                                {entry.mergeSuccess ? "修改成功" : "修改失败"}
+                                                            </span>
+                                                        </div>
+                                                    </>
+                                                )}
                                             </div>
-                                        ))}
-                                    </div>
-                                )}
+                                            ))}
+                                        </div>
+                                    );
+                                })()}
                             </div>
                         )}
                     </div>
