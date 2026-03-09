@@ -1,19 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { io } from "socket.io-client";
 
-/** 滚球赔率房间：后端 KafkaWsConstant.Room.ROOM_IN_PLAY */
-export const ROOM_IN_PLAY = "5";
-
-/** 服务端推送事件：KafkaWsConstant.WsMassage.MESSAGE_IN_PLAY_ODDS_UPDATE */
+/** 服务端推送 type：与 KafkaWsConstant.WsMassage 一致 */
 export const EVENT_IN_PLAY_ODDS_UPDATE = "in_play_odds_update";
+export const EVENT_ADD = "event_add";
+export const EVENT_REMOVE = "in_play_event_remove";
+export const EVENT_CORNERS = "corners_yellow_red_cards";
+/** 滚球联赛列表变化（增删联赛） */
+export const EVENT_INPLAY_LEAGUE = "inplay_league";
+/** 某联赛下赛事列表变化（新增赛事、赛事结束等），data 带 leagueId */
+export const EVENT_LEAGUE_EVENTS = "league";
 
 /**
- * 连接 Socket.IO /soccer namespace，在滚球界面加入 ROOM_IN_PLAY，接收 in_play_odds_update。
+ * 原生 WebSocket 连接 /ws/soccer：
+ * 1. 先 REST GET /api/ws/token 拿 token，再带 token 连一条 WS（无 sid 握手）。
+ * 2. 连接成功后立即发 {"type":"subscribe","eventIds":[...],"topics":["inplay-league","league:leagueId"]}，服务端不返回 sid，直接等订阅。
+ * 3. 服务端推送格式 {"type":"xxx","data":...}，按 type 分发。
  */
-export function useOddsSocket({ baseUrl, enabled, onOddsUpdate }) {
+export function useOddsSocket({ baseUrl, enabled, eventIds = [], leagueId = null, onOddsUpdate, onCornersCards, onInplayLeagueUpdate, onLeagueEventsUpdate, userId, isDebug }) {
     const [connected, setConnected] = useState(false);
     const onOddsUpdateRef = useRef(onOddsUpdate);
     onOddsUpdateRef.current = onOddsUpdate;
+    const onCornersCardsRef = useRef(onCornersCards);
+    onCornersCardsRef.current = onCornersCards;
+    const onInplayLeagueRef = useRef(onInplayLeagueUpdate);
+    onInplayLeagueRef.current = onInplayLeagueUpdate;
+    const onLeagueEventsRef = useRef(onLeagueEventsUpdate);
+    onLeagueEventsRef.current = onLeagueEventsUpdate;
+    const wsRef = useRef(null);
+    const eventIdsRef = useRef(eventIds);
+    eventIdsRef.current = eventIds;
+    const leagueIdRef = useRef(leagueId);
+    leagueIdRef.current = leagueId;
 
     useEffect(() => {
         if (!enabled || !baseUrl) {
@@ -22,29 +39,107 @@ export function useOddsSocket({ baseUrl, enabled, onOddsUpdate }) {
         }
 
         const serverUrl = (baseUrl || "").replace(/\/$/, "");
-        const s = io(`${serverUrl}/soccer`, {
-            path: "/ws/socket.io",
-            transports: ["websocket"],
-            autoConnect: true,
-        });
+        let cancelled = false;
 
-        s.on("connect", () => {
-            setConnected(true);
-            s.emit("join", ROOM_IN_PLAY);
-        });
-        s.on("disconnect", () => setConnected(false));
-        s.on("connect_error", () => setConnected(false));
+        (async () => {
+            let token = null;
+            try {
+                const params = new URLSearchParams();
+                if (isDebug !== undefined && isDebug !== null) params.set("debug", String(isDebug));
+                if (userId !== undefined && userId !== null && userId !== "") params.set("userId", String(userId));
+                const qs = params.toString();
+                const url = qs ? `${serverUrl}/api/ws/token?${qs}` : `${serverUrl}/api/ws/token`;
+                const res = await fetch(url);
+                const json = await res.json();
+                if (json?.data?.token) token = json.data.token;
+            } catch (e) {
+                console.warn("[useOddsSocket] 获取 ws token 失败:", e);
+            }
+            if (cancelled) return;
+            if (!token) {
+                console.warn("[useOddsSocket] 无 token，不建立 WebSocket");
+                return;
+            }
 
-        s.on(EVENT_IN_PLAY_ODDS_UPDATE, (payload) => {
-            const mavo = typeof payload === "string" ? JSON.parse(payload) : payload;
-            if (onOddsUpdateRef.current) onOddsUpdateRef.current(mavo);
-        });
+            const wsScheme = serverUrl.startsWith("https") ? "wss" : "ws";
+            const wsHost = serverUrl.replace(/^https?:\/\//, "");
+            const wsUrl = `${wsScheme}://${wsHost}/ws/soccer?token=${encodeURIComponent(token)}`;
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                if (cancelled) return;
+                setConnected(true);
+                const ids = Array.isArray(eventIdsRef.current) ? eventIdsRef.current.map(String).sort() : [];
+                const topics = ["inplay-league"];
+                if (leagueIdRef.current != null && leagueIdRef.current !== "") {
+                    topics.push(`league:${leagueIdRef.current}`);
+                }
+                lastSubscribedRef.current = JSON.stringify({ eventIds: ids, topics });
+                ws.send(JSON.stringify({ type: "subscribe", eventIds: ids, topics }));
+            };
+
+            ws.onmessage = (ev) => {
+                if (cancelled) return;
+                try {
+                    const msg = JSON.parse(ev.data);
+                    const type = msg && msg.type;
+                    const data = msg && msg.data;
+                    if (type === "sub_ack") return;
+                    if (type === "heartbeat") return;
+                    if (type === EVENT_IN_PLAY_ODDS_UPDATE && onOddsUpdateRef.current) {
+                        onOddsUpdateRef.current(data);
+                    }
+                    if (type === EVENT_CORNERS && onCornersCardsRef.current) {
+                        onCornersCardsRef.current(data);
+                    }
+                    if ((type === EVENT_INPLAY_LEAGUE || type === "inplay-league") && onInplayLeagueRef.current) {
+                        onInplayLeagueRef.current(data);
+                    }
+                    if ((type === EVENT_LEAGUE_EVENTS || type === "league") && onLeagueEventsRef.current) {
+                        onLeagueEventsRef.current(data);
+                    }
+                    // 其他 type 如 event_add, in_play_event_remove 可按需处理
+                } catch (e) {
+                    console.warn("[useOddsSocket] 解析消息失败:", e);
+                }
+            };
+
+            ws.onclose = () => {
+                setConnected(false);
+                wsRef.current = null;
+                console.warn("[useOddsSocket] WebSocket 已关闭");
+            };
+
+            ws.onerror = () => {
+                setConnected(false);
+            };
+        })();
 
         return () => {
-            s.close();
+            cancelled = true;
+            const ws = wsRef.current;
+            wsRef.current = null;
+            if (ws && ws.readyState === WebSocket.OPEN) ws.close();
             setConnected(false);
         };
-    }, [baseUrl, enabled]);
+    }, [baseUrl, enabled, userId, isDebug]);
+
+    // eventIds 或 leagueId 变化时重发订阅
+    const lastSubscribedRef = useRef("");
+    useEffect(() => {
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const ids = Array.isArray(eventIds) ? eventIds.map(String).sort() : [];
+        const topics = ["inplay-league"];
+        if (leagueId != null && leagueId !== "") {
+            topics.push(`league:${leagueId}`);
+        }
+        const key = JSON.stringify({ eventIds: ids, topics });
+        if (lastSubscribedRef.current === key) return;
+        lastSubscribedRef.current = key;
+        ws.send(JSON.stringify({ type: "subscribe", eventIds: ids, topics }));
+    }, [eventIds, leagueId]);
 
     return { connected };
 }

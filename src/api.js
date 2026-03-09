@@ -173,3 +173,14 @@ export async function getBet365All({
         data: json,
     };
 }
+
+/** 比赛实时结果/进行时间（若有后端接口）：比分、半场、分钟秒、角球、红黄牌等 */
+export async function getMatchResult({ baseUrl = DEFAULT_BASE_URL, userId, eventId } = {}) {
+    if (!eventId) throw new Error("eventId 不能为空");
+    const query = buildQuery(authParams(userId));
+    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/soccer/event/result?${query}&eventId=${encodeURIComponent(eventId)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`result 失败 HTTP ${res.status}`);
+    const json = await res.json();
+    return { url, data: json };
+}

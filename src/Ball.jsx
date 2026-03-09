@@ -24,7 +24,102 @@ function getMatchListFromOddsResponse(raw, matchType) {
     return [];
 }
 
-/** 将 WS 推送的 MAVO 合并进 matchRaw：按 eventId 找到比赛，更新 treeResults 中同 id 的 MAVO */
+/** 将 WS 推送的 MAVO 的字段名归一为与 API 一致（如 ID->id, NA->na, OD->od），避免 WS 用 Fastjson 大写/驼峰导致前端匹配/展示异常 */
+function normalizeMavoFromWs(mavo) {
+    if (!mavo || typeof mavo !== "object") return mavo;
+    const MAVO_KEYS = { ID: "id", NA: "na", iD: "id", nA: "na", CN: "cn", DO: "do", FI: "fi", IT: "it", SU: "su", SS: "ss", TM: "tm", TS: "ts", TU: "tu", TT: "tt", CP: "cp" };
+    const COVO_KEYS = { CN: "cn", NA: "na", cN: "cn", nA: "na" };
+    const PAVO_KEYS = { ID: "id", NA: "na", OD: "od", nA: "na", oD: "od", HA: "ha", FI: "fi", IT: "it", N2: "n2", SU: "su", HD: "hd", BS: "bs" };
+
+    function addLowerAliases(obj, keyMap) {
+        if (!obj || typeof obj !== "object") return;
+        Object.keys(keyMap).forEach((upper) => {
+            if (obj[upper] !== undefined && obj[keyMap[upper]] === undefined) {
+                obj[keyMap[upper]] = obj[upper];
+            }
+        });
+    }
+
+    function normalizePa(pa) {
+        if (!pa || typeof pa !== "object") return;
+        addLowerAliases(pa, PAVO_KEYS);
+    }
+
+    function normalizeCo(co) {
+        if (!co || typeof co !== "object") return;
+        addLowerAliases(co, COVO_KEYS);
+        if (Array.isArray(co.pa)) co.pa.forEach(normalizePa);
+    }
+
+    addLowerAliases(mavo, MAVO_KEYS);
+    if (Array.isArray(mavo.co)) mavo.co.forEach(normalizeCo);
+    return mavo;
+}
+
+/** 从合并前的数据里找出本场、本玩法中「赔率发生变化」的选项 id 列表（用于只高亮变化的赔率）。
+ * 包含：新推送里赔率与旧不同的选项、旧有但新推送里没有的选项、以及旧有但新推送里变为空的选项。
+ */
+function getChangedPaIds(prevRaw, normalizedMavo) {
+    if (!prevRaw || !normalizedMavo) return [];
+    const eventId = normalizedMavo.eventId != null ? String(normalizedMavo.eventId) : null;
+    const maId = normalizedMavo.id != null ? String(normalizedMavo.id) : null;
+    if (eventId == null || maId == null) return [];
+
+    const data = prevRaw?.data?.data ?? prevRaw?.data ?? prevRaw;
+    const inPlay = data?.inPlay;
+    if (!Array.isArray(inPlay)) return [];
+
+    let oldMavo = null;
+    for (const group of inPlay) {
+        const value = group?.value;
+        if (!Array.isArray(value)) continue;
+        for (const match of value) {
+            const mid = match?.id != null ? String(match.id) : match?.bet365Id != null ? String(match.bet365Id) : null;
+            if (mid !== eventId) continue;
+            const tree = match?.treeResults;
+            if (!Array.isArray(tree)) break;
+            oldMavo = tree.find((m) => (m?.id != null ? String(m.id) : m?.ID != null ? String(m.ID) : null) === maId);
+            break;
+        }
+        if (oldMavo) break;
+    }
+    if (!oldMavo) return [];
+
+    const oldOptions = oldMavo?.co?.flatMap((c) => c.pa || []) ?? [];
+    const oldOdds = new Map();
+    oldOptions.forEach((pa) => {
+        const id = pa?.id != null ? String(pa.id) : pa?.ID != null ? String(pa.ID) : null;
+        if (id != null) oldOdds.set(id, pa?.od ?? pa?.OD ?? "");
+    });
+
+    const newOptions = normalizedMavo?.co?.flatMap((c) => c.pa || []) ?? [];
+    const newOdds = new Map();
+    newOptions.forEach((pa) => {
+        const id = pa?.id != null ? String(pa.id) : pa?.ID != null ? String(pa.ID) : null;
+        if (id != null) newOdds.set(id, pa?.od ?? pa?.OD ?? "");
+    });
+
+    const changedPaIds = [];
+    oldOdds.forEach((oldOd, id) => {
+        const newOd = newOdds.get(id);
+        const oldStr = String(oldOd ?? "").trim();
+        const newStr = String(newOd ?? "").trim();
+        if (newOd === undefined || newStr === "" || oldStr !== newStr) {
+            changedPaIds.push(id);
+        }
+    });
+    newOdds.forEach((newOd, id) => {
+        const oldOd = oldOdds.get(id);
+        const oldStr = String(oldOd ?? "").trim();
+        const newStr = String(newOd ?? "").trim();
+        if (oldOd === undefined || oldStr !== newStr) {
+            if (!changedPaIds.includes(id)) changedPaIds.push(id);
+        }
+    });
+    return changedPaIds;
+}
+
+/** 将 WS 推送的 MAVO 合并进 matchRaw：按 eventId 找到比赛，更新或新增 treeResults 中同 id 玩法。展示完全由后端控制：后端只推启用的玩法，前端 API 没有的也展示（WS 推了就显示） */
 function mergeMavoIntoMatchRaw(prevRaw, mavo) {
     if (!prevRaw || !mavo) return prevRaw;
     const eventId = mavo.eventId != null ? String(mavo.eventId) : null;
@@ -41,13 +136,54 @@ function mergeMavoIntoMatchRaw(prevRaw, mavo) {
             const mid = match?.id != null ? String(match.id) : match?.bet365Id != null ? String(match.bet365Id) : null;
             if (mid !== eventId) return match;
             const tree = Array.isArray(match.treeResults) ? [...match.treeResults] : [];
-            const idx = tree.findIndex((m) => (m?.id != null ? String(m.id) : null) === String(mavo.id));
+            const maIdStr = mavo.id != null ? String(mavo.id) : mavo.ID != null ? String(mavo.ID) : null;
+            const idx = maIdStr == null ? -1 : tree.findIndex((m) => (m?.id != null ? String(m.id) : m?.ID != null ? String(m.ID) : null) === maIdStr);
             if (idx >= 0) {
                 tree[idx] = mavo;
             } else {
                 tree.push(mavo);
             }
-            return { ...match, treeResults: tree };
+            let updatedMatch = { ...match, treeResults: tree };
+            const pushScore = mavo.sS ?? mavo.SS;
+            if (pushScore != null) updatedMatch.ballScore = String(pushScore);
+
+            // Bet365：TM/TS 为当前时段内已进行分钟/秒；TT 为 playing/break，break 时停止读秒
+            const pushMin = mavo.tM ?? mavo.TM;
+            const pushSec = mavo.tS ?? mavo.TS;
+            const payloadHalf = parseHalfFromPayload(mavo);
+            const isBreak = isTtBreak(mavo);
+            if (pushMin != null || pushSec != null) {
+                const min = pushMin != null ? Number(pushMin) : (updatedMatch.liveClockMinute ?? 0);
+                const sec = pushSec != null ? Number(pushSec) : (updatedMatch.liveClockSecond ?? 0);
+                updatedMatch = {
+                    ...updatedMatch,
+                    liveClockMinute: min,
+                    liveClockSecond: sec,
+                    liveClockUpdatedAt: Date.now(),
+                    liveHalf: payloadHalf != null ? payloadHalf : (min <= 45 ? 1 : 2),
+                    liveClockIsPeriodTime: true,
+                    liveClockOnBreak: isBreak,
+                };
+            } else {
+                const tuMs = parseTUToUtcMs(mavo.tU ?? mavo.TU);
+                const kickoffMs = getKickoffMs(match);
+                if (tuMs != null && kickoffMs != null) {
+                    const elapsedSec = Math.max(0, Math.floor((tuMs - kickoffMs) / 1000));
+                    const totalMin = Math.floor(elapsedSec / 60);
+                    const sec = Math.floor(elapsedSec % 60);
+                    const inferredHalf = totalMin < 45 ? 1 : 2;
+                    updatedMatch = {
+                        ...updatedMatch,
+                        liveClockMinute: totalMin,
+                        liveClockSecond: sec,
+                        liveClockUpdatedAt: Date.now(),
+                        liveHalf: payloadHalf != null ? payloadHalf : inferredHalf,
+                        liveClockIsPeriodTime: false,
+                        liveClockOnBreak: isBreak,
+                    };
+                }
+            }
+            return updatedMatch;
         });
         return { ...group, value: newValue };
     });
@@ -96,6 +232,58 @@ function getAwayName(match) {
     );
 }
 
+/** 解析 TU（Bet365 结果数据，UTC 时间 YYYYMMDDHHmmss）为 UTC 毫秒时间戳 */
+function parseTUToUtcMs(tuStr) {
+    if (tuStr == null || String(tuStr).length < 14) return null;
+    const s = String(tuStr).padStart(14, "0");
+    const year = parseInt(s.slice(0, 4), 10);
+    const month = parseInt(s.slice(4, 6), 10) - 1;
+    const day = parseInt(s.slice(6, 8), 10);
+    const hour = parseInt(s.slice(8, 10), 10);
+    const min = parseInt(s.slice(10, 12), 10);
+    const sec = parseInt(s.slice(12, 14), 10);
+    if (Number.isNaN(year) || Number.isNaN(month) || Number.isNaN(day)) return null;
+    return Date.UTC(year, month, day, hour, min, sec);
+}
+
+/** Bet365：TT 表示 playing(进行中) 或 break(休息/中场)。tt 为 0/"0"/false 视为 break */
+function isTtBreak(mavo) {
+    const v = mavo?.tt ?? mavo?.TT;
+    if (v == null) return false;
+    if (typeof v === "boolean") return !v;
+    const n = typeof v === "string" ? parseInt(v, 10) : Number(v);
+    return n === 0;
+}
+
+/** 解析半场：Bet365 标准用 CP(CURRENT_PERIOD)：1=上半场 2=下半场。TT 官方含义为 playing/break，不能当半场用。无 CP 时用 TM（比赛分钟）推断：≤45 上半场，>45 下半场；再兜底用 tt 0=上 1=下 */
+function parseHalfFromPayload(mavo) {
+    const cp = mavo?.cp ?? mavo?.CP;
+    if (cp != null && cp !== "") {
+        const n = typeof cp === "string" ? parseInt(cp, 10) : Number(cp);
+        if (n === 1) return 1;
+        if (n === 2) return 2;
+    }
+    const tM = mavo?.tM ?? mavo?.TM;
+    if (tM != null && tM !== "") {
+        const n = typeof tM === "string" ? parseInt(tM, 10) : Number(tM);
+        if (Number.isFinite(n)) return n <= 45 ? 1 : 2;
+    }
+    const tt = mavo?.tt ?? mavo?.TT;
+    if (tt != null && tt !== "") {
+        const n = typeof tt === "string" ? parseInt(tt, 10) : Number(tt);
+        if (n === 0) return 1;
+        if (n === 1) return 2;
+    }
+    return null;
+}
+
+/** 比赛开球时间（UTC 毫秒） */
+function getKickoffMs(match) {
+    const t = match?.time ?? match?.matchTime ?? match?.startTime ?? match?.eventTime;
+    if (t == null) return null;
+    return typeof t === "number" ? (t < 1e10 ? t * 1000 : t) : new Date(t).getTime();
+}
+
 /** 比赛时间统一按新加坡时间展示 */
 function getMatchTime(match) {
     const t = match?.time ?? match?.matchTime ?? match?.startTime ?? match?.eventTime;
@@ -118,6 +306,31 @@ function getScore(match) {
         return `${match?.homeScore ?? 0} : ${match?.awayScore ?? 0}`;
     }
     return "-";
+}
+
+/** 滚球进行时间展示：上半场/下半场 XX分XX秒。TT=break 时停止读秒，只显示推送的 TM/TS */
+function getLiveClockDisplay(match, nowTick) {
+    if (match?.timeStatus !== "1") return null;
+    const baseMin = match?.liveClockMinute ?? 0;
+    const baseSec = match?.liveClockSecond ?? 0;
+    const updatedAt = match?.liveClockUpdatedAt;
+    if (updatedAt == null && baseMin === 0 && baseSec === 0) return null;
+    const baseTotalSec = baseMin * 60 + baseSec;
+    const onBreak = match?.liveClockOnBreak === true;
+    const elapsedSec = onBreak ? 0 : (updatedAt != null && nowTick != null ? Math.max(0, Math.floor((nowTick - updatedAt) / 1000)) : 0);
+    const totalSec = baseTotalSec + elapsedSec;
+    const half = match?.liveHalf ?? (baseMin < 45 ? 1 : 2);
+    const halfLabel = half === 1 ? "上半场" : "下半场";
+    const isPeriodTime = match?.liveClockIsPeriodTime === true;
+    const displayMin = isPeriodTime
+        ? Math.floor(totalSec / 60)
+        : (half === 1 ? Math.floor(totalSec / 60) : Math.floor((totalSec - 45 * 60) / 60));
+    const displaySec = isPeriodTime
+        ? Math.floor(totalSec % 60)
+        : (half === 1 ? Math.floor(totalSec % 60) : Math.floor((totalSec - 45 * 60) % 60));
+    const safeMin = Math.max(0, displayMin);
+    const safeSec = Math.max(0, Math.min(59, displaySec));
+    return `${halfLabel} ${safeMin}分${String(safeSec).padStart(2, "0")}秒`;
 }
 
 /** 滚球赔率 分数转小数 (如 "4/5" -> 1.8，即 4/5+1) */
@@ -209,22 +422,45 @@ function MarketOddsCell({ marketKey, label, oddsObj, match, onAddSlip }) {
     );
 }
 
-/** 滚球：单个玩法（MAVO）展示，co[].pa 为选项，na/pNa 名称，od 赔率，ha 盘口 */
-function RollingMarketCell({ mavo, match, onAddSlip }) {
+/** 滚球：是否展示该玩法（至少有一项有名称；赔率为 "-" 的项也会展示，表示不可下注） */
+function isMavoDisplayable(mavo) {
     const options = mavo?.co?.flatMap((c) => c.pa || []) ?? [];
+    if (options.length === 0) return false;
+    return options.some((pa) => {
+        const name = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
+        return name !== "" && String(name).trim() !== "";
+    });
+}
+
+/** 滚球：单个玩法（MAVO）展示，co[].pa 为选项，na/pNa 名称，od 赔率；推送 "-" 表示不可下注，界面也显示 "-" 且不可点 */
+function RollingMarketCell({ mavo, match, onAddSlip, highlight }) {
+    const allOptions = mavo?.co?.flatMap((c) => c.pa || []) ?? [];
+    const options = allOptions;
     if (options.length === 0) return null;
-    const title = mavo.na || mavo.id || "";
+    const title = mavo.na || mavo.NA || mavo.id || mavo.ID || "";
+
+    const isThisMarketHighlighted =
+        highlight &&
+        (String(match?.id) === String(highlight.eventId) || String(match?.bet365Id) === String(highlight.eventId)) &&
+        (String(mavo?.id) === String(highlight.maId) || String(mavo?.ID) === String(highlight.maId));
+    const changedPaIds = isThisMarketHighlighted && Array.isArray(highlight.changedPaIds) ? highlight.changedPaIds : [];
 
     return (
         <div style={{ marginBottom: 10 }}>
             <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>{title}</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {options.map((pa, i) => {
-                    const odDecimal = inplayOddsToDecimal(pa?.od);
-                    const canAdd = onAddSlip && pa?.id && odDecimal != null;
+                    const paId = pa?.id != null ? String(pa.id) : pa?.ID != null ? String(pa.ID) : null;
+                    const isPaHighlighted = changedPaIds.length > 0 && paId != null && changedPaIds.includes(paId);
+                    const odRaw = pa?.od ?? pa?.OD ?? "";
+                    const isSuspended = odRaw === "" || String(odRaw).trim() === "" || String(odRaw).trim() === "-";
+                    const odDecimal = inplayOddsToDecimal(odRaw);
+                    const canAdd = onAddSlip && paId && odDecimal != null && !isSuspended;
+                    const displayOdds = isSuspended ? "-" : odRaw;
                     return (
                         <span
-                            key={pa.id || i}
+                            key={paId || i}
+                            className={isPaHighlighted ? "odds-updated-flash" : ""}
                             role="button"
                             tabIndex={canAdd ? 0 : undefined}
                             onClick={() => canAdd && onAddSlip({ type: "inplay", match, mavo, pa, odDecimal })}
@@ -232,19 +468,17 @@ function RollingMarketCell({ mavo, match, onAddSlip }) {
                             style={{
                                 fontSize: 13,
                                 padding: "4px 10px",
-                                background: "#f3f4f6",
+                                background: isSuspended ? "#f9fafb" : "#f3f4f6",
                                 borderRadius: 6,
-                                color: "#111827",
+                                color: isSuspended ? "#9ca3af" : "#111827",
                                 cursor: canAdd ? "pointer" : "default",
                             }}
                         >
-                            {(pa.na != null && pa.na !== "") ? pa.na : (pa.pNa != null ? pa.pNa : "-")}
-                            {pa.ha != null && String(pa.ha).trim() !== "" && (
-                                <span style={{ color: "#6b7280", marginLeft: 4 }}>({pa.ha})</span>
-                            )}
-                            {pa.od != null && (
-                                <span style={{ marginLeft: 6, fontWeight: 600 }}>{pa.od}</span>
-                            )}
+                            {(pa.na != null && pa.na !== "") ? pa.na : (pa.pNa != null ? pa.pNa : (pa.NA != null ? pa.NA : "-"))}
+                            {(pa.ha != null && String(pa.ha).trim() !== "") || (pa.HA != null && String(pa.HA).trim() !== "") ? (
+                                <span style={{ color: "#6b7280", marginLeft: 4 }}>({pa.ha ?? pa.HA})</span>
+                            ) : null}
+                            <span style={{ marginLeft: 6, fontWeight: 600 }}>{displayOdds}</span>
                         </span>
                     );
                 })}
@@ -267,9 +501,21 @@ export default function SoccerEarlyMarketPage() {
 
     const [matchRaw, setMatchRaw] = useState(null);
 
-    /** 赔率 WS 更新高亮：{ eventId, maId }，约 600ms 后清除 */
+    /** 用于 WS 回调中拿到当前选中的联赛，避免闭包陈旧 */
+    const selectedLeagueRef = useRef(selectedLeague);
+    selectedLeagueRef.current = selectedLeague;
     const [highlight, setHighlight] = useState(null);
     const highlightTimerRef = useRef(null);
+    const mergeTimerRef = useRef(null);
+
+    /** WS 赔率推送控制台：最近 N 条，用于调试。每项 { id, ts, eventId, maId, maName, summary, changedPaIds, oddsUnchanged, mergeSuccess } */
+    const [wsOddsConsoleLog, setWsOddsConsoleLog] = useState([]);
+    const WS_CONSOLE_MAX = 30;
+    /** 去重：避免同一条 WS 消息被处理两次（如 Strict Mode 双连接）导致控制台显示两条 */
+    const lastProcessedRef = useRef({ key: "", ts: 0 });
+
+    /** 滚球进行时间读秒：每秒更新，用于 getLiveClockDisplay(match, clockTick) */
+    const [clockTick, setClockTick] = useState(() => Date.now());
 
     /** 投注单：每项 { key, type:'pre'|'inplay', match, ... } */
     const [betSlip, setBetSlip] = useState([]);
@@ -282,6 +528,8 @@ export default function SoccerEarlyMarketPage() {
     const [orderList, setOrderList] = useState([]);
     const [orderListTotal, setOrderListTotal] = useState(0);
     const [orderListLoading, setOrderListLoading] = useState(false);
+    /** 订单列表 Tab：'unsettled' 未结算，'other' 其他（结算失败+已结算） */
+    const [orderListTab, setOrderListTab] = useState("unsettled");
     const [orderFlow, setOrderFlow] = useState(null);
     const slipKeyRef = useRef(0);
 
@@ -320,20 +568,101 @@ export default function SoccerEarlyMarketPage() {
     );
 
     const handleOddsUpdate = (mavo) => {
-        setMatchRaw((prev) => mergeMavoIntoMatchRaw(prev, mavo));
+        const normalized = normalizeMavoFromWs(mavo);
+        if (!normalized) return;
+        const dedupeKey = `${normalized.eventId ?? ""}_${normalized.id ?? ""}_${JSON.stringify((normalized?.co ?? []).flatMap((c) => c.pa || []).slice(0, 8).map((pa) => pa?.od ?? pa?.OD))}`;
+        const now = Date.now();
+        if (lastProcessedRef.current.key === dedupeKey && now - lastProcessedRef.current.ts < 500) {
+            return;
+        }
+        lastProcessedRef.current = { key: dedupeKey, ts: now };
+
         if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
-        setHighlight({ eventId: mavo.eventId != null ? String(mavo.eventId) : null, maId: mavo.id });
-        highlightTimerRef.current = setTimeout(() => {
-            setHighlight(null);
-            highlightTimerRef.current = null;
-        }, 600);
+        if (mergeTimerRef.current) clearTimeout(mergeTimerRef.current);
+
+        setMatchRaw((prev) => {
+            const changedPaIds = getChangedPaIds(prev, normalized);
+            const merged = mergeMavoIntoMatchRaw(prev, normalized);
+
+            if (changedPaIds.length > 0) {
+                setHighlight({
+                    eventId: normalized.eventId != null ? String(normalized.eventId) : null,
+                    maId: normalized.id,
+                    changedPaIds,
+                });
+                mergeTimerRef.current = setTimeout(() => {
+                    setMatchRaw((p) => mergeMavoIntoMatchRaw(p, normalized));
+                    mergeTimerRef.current = null;
+                    highlightTimerRef.current = setTimeout(() => {
+                        setHighlight(null);
+                        highlightTimerRef.current = null;
+                    }, 300);
+                }, 200);
+                // 先高亮，200ms 后再更新赔率，再 300ms 后取消高亮
+            }
+
+            const oddsStrs = (normalized?.co ?? [])
+                .flatMap((c) => c.pa || [])
+                .slice(0, 8)
+                .map((pa) => pa?.od ?? pa?.OD ?? "-");
+            const summary = oddsStrs.length > 0 ? oddsStrs.join("|") : "-";
+            setWsOddsConsoleLog((log) => [
+                {
+                    id: Date.now(),
+                    ts: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+                    eventId: normalized.eventId != null ? String(normalized.eventId) : null,
+                    maId: normalized.id != null ? String(normalized.id) : "-",
+                    maName: normalized.na ?? normalized.NA ?? "-",
+                    summary: summary,
+                    changedPaIds: changedPaIds.slice(),
+                    oddsUnchanged: changedPaIds.length === 0,
+                    mergeSuccess: true,
+                },
+                ...log.slice(0, WS_CONSOLE_MAX - 1),
+            ]);
+
+            return changedPaIds.length > 0 ? prev : merged;
+        });
     };
+
+    // 滚球时只订阅当前列表中的比赛 id，服务端按 eventId 推送
+    const eventIds = useMemo(() => {
+        if (type !== "1" || !matchList?.length) return [];
+        return matchList.map((m) => m.eventId ?? m.id).filter(Boolean).map(String);
+    }, [type, matchList]);
 
     const { connected: wsConnected } = useOddsSocket({
         baseUrl,
         enabled: type === "1",
+        eventIds,
+        leagueId: selectedLeague?.leagueId ?? null,
         onOddsUpdate: handleOddsUpdate,
+        onCornersCards: undefined,
+        onInplayLeagueUpdate: (data) => {
+            const list = Array.isArray(data) ? data : (data?.data ?? []);
+            setLeagueList(Array.isArray(list) ? list : []);
+        },
+        onLeagueEventsUpdate: (data) => {
+            const leagueId = data?.leagueId != null ? String(data.leagueId) : null;
+            if (leagueId == null) return;
+            if (String(selectedLeagueRef.current?.leagueId) !== leagueId) return;
+            setMatchRaw((prev) => {
+                if (!prev) return prev;
+                const inPlay = data?.data?.inPlay ?? data?.inPlay;
+                const nextData = Array.isArray(inPlay) ? { inPlay } : data?.data ?? (data?.inPlay != null ? { inPlay: data.inPlay } : null);
+                if (!nextData || typeof nextData !== "object") return prev;
+                return { ...prev, data: nextData };
+            });
+        },
+        userId,
+        isDebug: true,
     });
+
+    useEffect(() => {
+        if (type !== "1" || !matchList?.length) return;
+        const id = setInterval(() => setClockTick(Date.now()), 1000);
+        return () => clearInterval(id);
+    }, [type, matchList?.length]);
 
     const loadLeagues = async () => {
         setError("");
@@ -531,11 +860,18 @@ export default function SoccerEarlyMarketPage() {
         return base;
     };
 
-    const loadOrderList = useCallback(async () => {
+    const loadOrderList = useCallback(async (tab) => {
+        const isUnsettled = tab !== "other";
         setOrderListLoading(true);
         try {
-            const res = await getOrderList({ baseUrl, userId, type: 0, page: 1, size: 30 });
-            // 后端 ok(PageResponse) => { code: 0, data: { data: [...], total } }
+            const res = await getOrderList({
+                baseUrl,
+                userId,
+                type: isUnsettled ? 0 : 1,
+                page: 1,
+                size: 50,
+                ...(isUnsettled ? {} : { day: getSelectedDayTimestamp(0) }),
+            });
             const page = res?.data?.data;
             const list = Array.isArray(page?.data) ? page.data : Array.isArray(page) ? page : [];
             setOrderList(list);
@@ -547,6 +883,10 @@ export default function SoccerEarlyMarketPage() {
             setOrderListLoading(false);
         }
     }, [baseUrl, userId]);
+
+    const loadOrderListCurrentTab = useCallback(() => {
+        loadOrderList(orderListTab);
+    }, [loadOrderList, orderListTab]);
 
     const loadOrderFlow = useCallback(async () => {
         try {
@@ -560,10 +900,15 @@ export default function SoccerEarlyMarketPage() {
 
     useEffect(() => {
         if (baseUrl && userId) {
-            loadOrderList();
+            loadOrderList("unsettled");
             loadOrderFlow();
         }
     }, [baseUrl, userId, loadOrderList, loadOrderFlow]);
+
+    const handleOrderListTabChange = (tab) => {
+        setOrderListTab(tab);
+        loadOrderList(tab);
+    };
 
     const handleSubmitOrder = async () => {
         const amount = parseFloat(betAmount);
@@ -602,7 +947,7 @@ export default function SoccerEarlyMarketPage() {
             setBetSlip([]);
             setConfirmStep(false);
             setBetAmount("");
-            loadOrderList();
+            loadOrderList(orderListTab);
             loadOrderFlow();
         } catch (err) {
             setSubmitError(err.message || "下单失败");
@@ -743,15 +1088,13 @@ export default function SoccerEarlyMarketPage() {
                     </div>
                 ) : null}
 
-                {/* 联赛 + 比赛列表 + 右侧投注单：高度拉大约三倍 */}
+                {/* 联赛 + 比赛列表 + 右侧投注单：按内容高度自动扩容，无内部滚动条 */}
                 <div
                     style={{
                         display: "grid",
                         gridTemplateColumns: "280px 1fr 320px",
                         gap: 12,
-                        flex: 1,
-                        minHeight: "calc(3 * (100vh - 240px))",
-                        alignContent: "stretch",
+                        alignItems: "start",
                     }}
                 >
                     <div
@@ -760,16 +1103,12 @@ export default function SoccerEarlyMarketPage() {
                             border: "1px solid #e5e7eb",
                             borderRadius: 12,
                             overflow: "hidden",
-                            display: "flex",
-                            flexDirection: "column",
-                            minHeight: 0,
                         }}
                     >
                         <div
                             style={{
                                 padding: "12px 14px",
                                 borderBottom: "1px solid #e5e7eb",
-                                flexShrink: 0,
                             }}
                         >
                             <div style={{ fontWeight: 700, fontSize: 15 }}>联赛列表</div>
@@ -778,7 +1117,7 @@ export default function SoccerEarlyMarketPage() {
                             </div>
                         </div>
 
-                        <div style={{ flex: 1, overflowY: "auto", padding: 10, minHeight: 0 }}>
+                        <div style={{ padding: 10 }}>
                             {leagueList.length === 0 ? (
                                 <div
                                     style={{
@@ -823,24 +1162,13 @@ export default function SoccerEarlyMarketPage() {
                         </div>
                     </div>
 
-                    <div
-                        style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            minHeight: 0,
-                            flex: 1,
-                        }}
-                    >
+                    <div>
                         <div
                             style={{
                                 background: "#fff",
                                 border: "1px solid #e5e7eb",
                                 borderRadius: 12,
                                 overflow: "hidden",
-                                display: "flex",
-                                flexDirection: "column",
-                                flex: 1,
-                                minHeight: 0,
                             }}
                         >
                             <div
@@ -922,7 +1250,7 @@ export default function SoccerEarlyMarketPage() {
                             </div>
                             )}
 
-                            <div style={{ flex: 1, overflowY: "auto", padding: 12, minHeight: 0 }}>
+                            <div style={{ padding: 12 }}>
                                 {matchLoading ? (
                                     <div
                                         style={{
@@ -976,7 +1304,12 @@ export default function SoccerEarlyMarketPage() {
                                                         </span>
                                                     )}
                                                 </div>
-                                                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                                                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                                                    {match?.timeStatus === "1" && getLiveClockDisplay(match, clockTick) && (
+                                                        <span style={{ fontSize: 12, color: "#0369a1", fontWeight: 600 }}>
+                                                            {getLiveClockDisplay(match, clockTick)}
+                                                        </span>
+                                                    )}
                                                     {(match?.timeStatus === "1" || match?.ballScore) && getScore(match) !== "-" && (
                                                         <span style={{ fontSize: 15, color: "#059669", fontWeight: 700 }}>
                                                             {getScore(match)}
@@ -990,19 +1323,19 @@ export default function SoccerEarlyMarketPage() {
 
                                             {match?.timeStatus === "1" && Array.isArray(match?.treeResults) && match.treeResults.length > 0 ? (
                                                 <div
-                                                    className={highlight && String(match?.id) === String(highlight.eventId) ? "odds-updated-flash" : ""}
                                                     style={{
                                                         display: "grid",
                                                         gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
                                                         gap: 12,
                                                     }}
                                                 >
-                                                    {match.treeResults.map((mavo, idx) => (
+                                                    {match.treeResults.filter(isMavoDisplayable).map((mavo, idx) => (
                                                         <RollingMarketCell
-                                                            key={mavo.id || idx}
+                                                            key={mavo.id || mavo.ID || idx}
                                                             mavo={mavo}
                                                             match={match}
                                                             onAddSlip={addToSlip}
+                                                            highlight={highlight}
                                                         />
                                                     ))}
                                                 </div>
@@ -1061,9 +1394,6 @@ export default function SoccerEarlyMarketPage() {
                             background: "#fff",
                             border: "1px solid #e5e7eb",
                             borderRadius: 12,
-                            display: "flex",
-                            flexDirection: "column",
-                            minHeight: 0,
                             overflow: "hidden",
                         }}
                     >
@@ -1072,7 +1402,7 @@ export default function SoccerEarlyMarketPage() {
                         </div>
                         {!confirmStep ? (
                             <>
-                                <div style={{ flex: 1, overflowY: "auto", padding: 10, minHeight: 0 }}>
+                                <div style={{ padding: 10 }}>
                                     {betSlip.length === 0 ? (
                                         <div style={{ color: "#9ca3af", fontSize: 13 }}>点击左侧赔率加入</div>
                                     ) : (
@@ -1133,7 +1463,7 @@ export default function SoccerEarlyMarketPage() {
                                 )}
                             </>
                         ) : (
-                            <div style={{ flex: 1, padding: 12, overflowY: "auto" }}>
+                            <div style={{ padding: 12 }}>
                                 <div style={{ fontSize: 13, marginBottom: 10 }}>请确认投注内容并输入金额</div>
                                 {betSlip.map((item) => (
                                     <div key={item.key} style={{ marginBottom: 6, fontSize: 12, color: "#374151" }}>
@@ -1173,28 +1503,113 @@ export default function SoccerEarlyMarketPage() {
                                 </div>
                             </div>
                         )}
+                        {/* 滚球时：WS 赔率推送控制台 */}
+                        {type === "1" && (
+                            <div style={{ borderTop: "1px solid #e5e7eb", padding: 10, background: "#f9fafb", maxHeight: 320, overflow: "auto" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                                    <span style={{ fontWeight: 600, fontSize: 13, color: "#374151" }}>WS 赔率推送</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => setWsOddsConsoleLog([])}
+                                        style={{ padding: "4px 10px", fontSize: 12, border: "1px solid #d1d5db", borderRadius: 6, background: "#fff", cursor: "pointer", color: "#6b7280" }}
+                                    >
+                                        清除
+                                    </button>
+                                </div>
+                                {wsOddsConsoleLog.length === 0 ? (
+                                    <div style={{ fontSize: 12, color: "#9ca3af" }}>暂无推送记录，连接后收到推送会在此显示</div>
+                                ) : (
+                                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                        {[...wsOddsConsoleLog]
+                                            .sort((a, b) => (b.id - a.id))
+                                            .map((entry) => (
+                                            <div
+                                                key={entry.id}
+                                                style={{
+                                                    fontSize: 11,
+                                                    padding: 8,
+                                                    background: "#fff",
+                                                    border: "1px solid #e5e7eb",
+                                                    borderRadius: 6,
+                                                    fontFamily: "monospace",
+                                                }}
+                                            >
+                                                <div style={{ marginBottom: 4, color: "#6b7280" }}>
+                                                    [{entry.ts}] eventId={entry.eventId} maId={entry.maId} {entry.maName}
+                                                </div>
+                                                <div style={{ marginBottom: 4, wordBreak: "break-all" }}>{entry.summary}</div>
+                                                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                                                    <span style={{ color: entry.oddsUnchanged ? "#059669" : "#d97706", fontWeight: 600 }}>
+                                                        {entry.oddsUnchanged ? "与之前一致" : "有变化"}
+                                                        {entry.changedPaIds.length > 0 && ` (${entry.changedPaIds.length} 项)`}
+                                                    </span>
+                                                    <span style={{ color: entry.mergeSuccess ? "#059669" : "#dc2626" }}>
+                                                        {entry.mergeSuccess ? "修改成功" : "修改失败"}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
                 </div>
 
                 {/* 下方：订单列表 + 结算汇总 */}
                 <div style={{ flexShrink: 0, marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
                     <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden" }}>
-                        <div style={{ padding: "12px 14px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                            <span style={{ fontWeight: 700, fontSize: 15 }}>订单列表（未结算）</span>
+                        <div style={{ padding: "12px 14px", borderBottom: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <span style={{ fontWeight: 700, fontSize: 15 }}>订单列表</span>
+                                <span style={{ display: "flex", gap: 0, border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden" }}>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleOrderListTabChange("unsettled")}
+                                        style={{
+                                            padding: "6px 12px",
+                                            fontSize: 13,
+                                            border: "none",
+                                            background: orderListTab === "unsettled" ? "#111827" : "#fff",
+                                            color: orderListTab === "unsettled" ? "#fff" : "#374151",
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        未结算
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleOrderListTabChange("other")}
+                                        style={{
+                                            padding: "6px 12px",
+                                            fontSize: 13,
+                                            border: "none",
+                                            borderLeft: "1px solid #e5e7eb",
+                                            background: orderListTab === "other" ? "#111827" : "#fff",
+                                            color: orderListTab === "other" ? "#fff" : "#374151",
+                                            cursor: "pointer",
+                                        }}
+                                    >
+                                        其他（结算失败/已结算）
+                                    </button>
+                                </span>
+                            </div>
                             <button
                                 type="button"
-                                onClick={loadOrderList}
+                                onClick={loadOrderListCurrentTab}
                                 disabled={orderListLoading}
                                 style={{ padding: "6px 12px", fontSize: 13, border: "1px solid #d1d5db", borderRadius: 8, background: "#fff", cursor: "pointer" }}
                             >
                                 {orderListLoading ? "加载中..." : "刷新"}
                             </button>
                         </div>
-                        <div style={{ maxHeight: 280, overflowY: "auto", padding: 12 }}>
+                        <div style={{ padding: 12 }}>
                             {orderListLoading && orderList.length === 0 ? (
                                 <div style={{ color: "#9ca3af", textAlign: "center", padding: 24 }}>加载中...</div>
                             ) : orderList.length === 0 ? (
-                                <div style={{ color: "#9ca3af", textAlign: "center", padding: 24 }}>暂无订单</div>
+                                <div style={{ color: "#9ca3af", textAlign: "center", padding: 24 }}>
+                                    {orderListTab === "unsettled" ? "暂无未结算订单" : "暂无其他状态订单"}
+                                </div>
                             ) : (
                                 orderList.map((order) => (
                                     <div
@@ -1209,7 +1624,14 @@ export default function SoccerEarlyMarketPage() {
                                     >
                                         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
                                             <span>订单号: {order.orderId || order.contact || "-"}</span>
-                                            <span>金额: {order.betAmount} · 结算: {order.settlementAmount != null ? order.settlementAmount : "-"}</span>
+                                            <span>
+                                                金额: {order.betAmount} · 结算: {order.settlementAmount != null ? order.settlementAmount : "-"}
+                                                {order.settlementStatus != null && (
+                                                    <span style={{ marginLeft: 8, color: order.settlementStatus === "HAS_BEEN_SETTLED" ? "#059669" : order.settlementStatus === "SETTLEMENT_FAIL" ? "#dc2626" : "#6b7280", fontSize: 11 }}>
+                                                        {order.settlementStatus === "HAS_BEEN_SETTLED" ? "已结算" : order.settlementStatus === "SETTLEMENT_FAIL" ? "结算失败" : order.settlementStatus}
+                                                    </span>
+                                                )}
+                                            </span>
                                         </div>
                                         {order.contactVO && order.contactVO.length > 0 ? (
                                             order.contactVO.map((c, i) => (
