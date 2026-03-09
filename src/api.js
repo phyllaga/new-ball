@@ -178,7 +178,8 @@ export async function getBet365All({
 export async function getMatchResult({ baseUrl = DEFAULT_BASE_URL, userId, eventId } = {}) {
     if (!eventId) throw new Error("eventId 不能为空");
     const query = buildQuery(authParams(userId));
-    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/soccer/event/result?${query}&eventId=${encodeURIComponent(eventId)}`;
+    // 使用 bet365Id 查询结果：后端 EventResultController 暴露 /event/result/queryByBet365Id?bet365Id=...
+    const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, "")}/event/result/queryByBet365Id?${query}&bet365Id=${encodeURIComponent(eventId)}`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`result 失败 HTTP ${res.status}`);
     const json = await res.json();

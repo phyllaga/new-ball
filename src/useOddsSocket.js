@@ -9,6 +9,8 @@ export const EVENT_CORNERS = "corners_yellow_red_cards";
 export const EVENT_INPLAY_LEAGUE = "inplay_league";
 /** 某联赛下赛事列表变化（新增赛事、赛事结束等），data 带 leagueId */
 export const EVENT_LEAGUE_EVENTS = "league";
+/** 单场比赛的事件/赛况快照（包含时间状态、进行时间、比分等），用于前端时钟展示 */
+export const EVENT_EVENT_RESULT = "event_result";
 
 /**
  * 原生 WebSocket 连接 /ws/soccer：
@@ -16,7 +18,7 @@ export const EVENT_LEAGUE_EVENTS = "league";
  * 2. 连接成功后立即发 {"type":"subscribe","eventIds":[...],"topics":["inplay-league","league:leagueId"]}，服务端不返回 sid，直接等订阅。
  * 3. 服务端推送格式 {"type":"xxx","data":...}，按 type 分发。
  */
-export function useOddsSocket({ baseUrl, enabled, eventIds = [], leagueId = null, onOddsUpdate, onCornersCards, onInplayLeagueUpdate, onLeagueEventsUpdate, userId, isDebug }) {
+export function useOddsSocket({ baseUrl, enabled, eventIds = [], leagueId = null, onOddsUpdate, onCornersCards, onInplayLeagueUpdate, onLeagueEventsUpdate, onEventResult, userId, isDebug }) {
     const [connected, setConnected] = useState(false);
     const onOddsUpdateRef = useRef(onOddsUpdate);
     onOddsUpdateRef.current = onOddsUpdate;
@@ -26,6 +28,8 @@ export function useOddsSocket({ baseUrl, enabled, eventIds = [], leagueId = null
     onInplayLeagueRef.current = onInplayLeagueUpdate;
     const onLeagueEventsRef = useRef(onLeagueEventsUpdate);
     onLeagueEventsRef.current = onLeagueEventsUpdate;
+    const onEventResultRef = useRef(onEventResult);
+    onEventResultRef.current = onEventResult;
     const wsRef = useRef(null);
     const eventIdsRef = useRef(eventIds);
     eventIdsRef.current = eventIds;
@@ -98,6 +102,9 @@ export function useOddsSocket({ baseUrl, enabled, eventIds = [], leagueId = null
                     }
                     if ((type === EVENT_LEAGUE_EVENTS || type === "league") && onLeagueEventsRef.current) {
                         onLeagueEventsRef.current(data);
+                    }
+                    if (type === EVENT_EVENT_RESULT && onEventResultRef.current) {
+                        onEventResultRef.current(data);
                     }
                     // 其他 type 如 event_add, in_play_event_remove 可按需处理
                 } catch (e) {

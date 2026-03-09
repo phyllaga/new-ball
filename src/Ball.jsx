@@ -119,7 +119,7 @@ function getChangedPaIds(prevRaw, normalizedMavo) {
     return changedPaIds;
 }
 
-/** 将 WS 推送的 MAVO 合并进 matchRaw：按 eventId 找到比赛，更新或新增 treeResults 中同 id 玩法。展示完全由后端控制：后端只推启用的玩法，前端 API 没有的也展示（WS 推了就显示） */
+/** 将 WS 推送的 MAVO 合并进 matchRaw：按 eventId 找到比赛，按玩法 id 找到 mavo，只合并 co[].pa 的赔率等字段，不整条替换，避免推送只含部分选项时丢失其余选项导致无法下单 */
 function mergeMavoIntoMatchRaw(prevRaw, mavo) {
     if (!prevRaw || !mavo) return prevRaw;
     const eventId = mavo.eventId != null ? String(mavo.eventId) : null;
@@ -135,11 +135,11 @@ function mergeMavoIntoMatchRaw(prevRaw, mavo) {
         const newValue = value.map((match) => {
             const mid = match?.id != null ? String(match.id) : match?.bet365Id != null ? String(match.bet365Id) : null;
             if (mid !== eventId) return match;
-            const tree = Array.isArray(match.treeResults) ? [...match.treeResults] : [];
+            const tree = Array.isArray(match.treeResults) ? match.treeResults.slice() : [];
             const maIdStr = mavo.id != null ? String(mavo.id) : mavo.ID != null ? String(mavo.ID) : null;
             const idx = maIdStr == null ? -1 : tree.findIndex((m) => (m?.id != null ? String(m.id) : m?.ID != null ? String(m.ID) : null) === maIdStr);
             if (idx >= 0) {
-                tree[idx] = mavo;
+                tree[idx] = mergeMavoPaIntoExisting(tree[idx], mavo);
             } else {
                 tree.push(mavo);
             }
@@ -147,7 +147,6 @@ function mergeMavoIntoMatchRaw(prevRaw, mavo) {
             const pushScore = mavo.sS ?? mavo.SS;
             if (pushScore != null) updatedMatch.ballScore = String(pushScore);
 
-            // Bet365：TM/TS 为当前时段内已进行分钟/秒；TT 为 playing/break，break 时停止读秒
             const pushMin = mavo.tM ?? mavo.TM;
             const pushSec = mavo.tS ?? mavo.TS;
             const payloadHalf = parseHalfFromPayload(mavo);
@@ -196,6 +195,52 @@ function mergeMavoIntoMatchRaw(prevRaw, mavo) {
         return { ...prevRaw, data: { ...prevRaw.data, ...newData } };
     }
     return { ...prevRaw, ...newData };
+}
+
+/** 将推送的 mavo 的 co[].pa 赔率合并进已有 mavo，保留已有选项结构，只更新匹配到的 pa 的 od/ha/na 等；若推送里没有对应 co/pa 则保留原值 */
+function mergeMavoPaIntoExisting(existingMavo, pushMavo) {
+    if (!existingMavo || !pushMavo) return existingMavo;
+    const existingCo = Array.isArray(existingMavo.co) ? existingMavo.co : [];
+    const pushCo = Array.isArray(pushMavo.co) ? pushMavo.co : [];
+    if (pushCo.length === 0) return existingMavo;
+
+    const newCo = existingCo.map((existingC, coIndex) => {
+        const existingPa = Array.isArray(existingC.pa) ? existingC.pa : [];
+        const pushC = pushCo[coIndex] || pushCo[0];
+        const pushPaList = Array.isArray(pushC.pa) ? pushC.pa : [];
+        const paById = new Map();
+        pushPaList.forEach((p) => {
+            const pid = p?.id ?? p?.ID;
+            if (pid != null) paById.set(String(pid), p);
+        });
+        const newPa = existingPa.map((oldPa) => {
+            const paId = oldPa?.id ?? oldPa?.ID;
+            const pushed = paId != null ? paById.get(String(paId)) : null;
+            if (!pushed) return oldPa;
+            return { ...oldPa, od: pushed.od ?? pushed.OD ?? oldPa.od ?? oldPa.OD, OD: pushed.OD ?? pushed.od ?? oldPa.OD ?? oldPa.od, ha: pushed.ha ?? pushed.HA ?? oldPa.ha ?? oldPa.HA, HA: pushed.HA ?? pushed.ha ?? oldPa.HA ?? oldPa.ha, na: pushed.na ?? pushed.NA ?? oldPa.na ?? oldPa.NA, NA: pushed.NA ?? pushed.na ?? oldPa.NA ?? oldPa.na };
+        });
+        const addedPaIds = new Set(existingPa.map((p) => String(p?.id ?? p?.ID ?? "")));
+        pushPaList.forEach((p) => {
+            const pid = p?.id ?? p?.ID;
+            if (pid != null && !addedPaIds.has(String(pid))) {
+                newPa.push(p);
+                addedPaIds.add(String(pid));
+            }
+        });
+        return { ...existingC, pa: newPa };
+    });
+
+    return {
+        ...existingMavo,
+        ...pushMavo,
+        id: pushMavo.id ?? pushMavo.ID ?? existingMavo.id ?? existingMavo.ID,
+        ID: pushMavo.ID ?? pushMavo.id ?? existingMavo.ID ?? existingMavo.id,
+        na: pushMavo.na ?? pushMavo.NA ?? existingMavo.na ?? existingMavo.NA,
+        NA: pushMavo.NA ?? pushMavo.na ?? existingMavo.NA ?? existingMavo.na,
+        updateAt: pushMavo.updateAt ?? pushMavo.UpdateAt ?? existingMavo.updateAt ?? existingMavo.UpdateAt,
+        UpdateAt: pushMavo.UpdateAt ?? pushMavo.updateAt ?? existingMavo.UpdateAt ?? existingMavo.updateAt,
+        co: newCo.length > 0 ? newCo : (pushMavo.co || existingMavo.co),
+    };
 }
 
 function getMatchKey(match, index) {
@@ -631,10 +676,61 @@ export default function SoccerEarlyMarketPage() {
         });
     };
 
+    const handleEventResult = useCallback((snapshot) => {
+        if (!snapshot) return;
+        const list = Array.isArray(snapshot) ? snapshot : (snapshot.events && Array.isArray(snapshot.events) ? snapshot.events : [snapshot]);
+        setMatchRaw((prev) => {
+            if (!prev) return prev;
+            const cloned = { ...prev };
+            const data = cloned?.data?.data ?? cloned?.data ?? cloned;
+            const inPlay = data?.inPlay;
+            if (!Array.isArray(inPlay)) return prev;
+            let updated = false;
+            for (const item of list) {
+                const eventIdStr = item.eventId != null ? String(item.eventId) : (item.bet365Id != null ? String(item.bet365Id) : null);
+                if (!eventIdStr) continue;
+                const timeStatus = item.timeStatus != null ? String(item.timeStatus) : null;
+                const minute = item.tm != null ? Number(item.tm) : null;
+                const second = item.ts != null ? Number(item.ts) : null;
+                const scoreStr = item.ss != null ? String(item.ss) : (item.ballScore != null ? String(item.ballScore) : null);
+                const liveMin = Number.isFinite(minute) ? Math.max(0, minute) : null;
+                const liveSec = Number.isFinite(second) ? Math.max(0, Math.min(59, second)) : null;
+                const liveHalf = liveMin != null ? (liveMin <= 45 ? 1 : 2) : null;
+
+                outer: for (const group of inPlay) {
+                    const value = group?.value;
+                    if (!Array.isArray(value)) continue;
+                    for (let i = 0; i < value.length; i++) {
+                        const match = value[i];
+                        const mid = match?.id != null ? String(match.id) : match?.bet365Id != null ? String(match.bet365Id) : null;
+                        if (mid !== eventIdStr) continue;
+                        const next = { ...match };
+                        if (timeStatus != null) next.timeStatus = timeStatus;
+                        if (liveMin != null || liveSec != null) {
+                            next.liveClockMinute = liveMin != null ? liveMin : (next.liveClockMinute ?? 0);
+                            next.liveClockSecond = liveSec != null ? liveSec : (next.liveClockSecond ?? 0);
+                            next.liveClockUpdatedAt = Date.now();
+                            next.liveHalf = liveHalf != null ? liveHalf : (next.liveClockMinute <= 45 ? 1 : 2);
+                            next.liveClockIsPeriodTime = true;
+                            next.liveClockOnBreak = false;
+                        }
+                        if (scoreStr != null) {
+                            next.ballScore = scoreStr;
+                        }
+                        value[i] = next;
+                        updated = true;
+                        break outer;
+                    }
+                }
+            }
+            return updated ? cloned : prev;
+        });
+    }, []);
+
     // 滚球时只订阅当前列表中的比赛 id，服务端按 eventId 推送
     const eventIds = useMemo(() => {
-        if (type !== "1" || !matchList?.length) return [];
-        return matchList.map((m) => m.eventId ?? m.id).filter(Boolean).map(String);
+        // 新方案：不再按 eventId 订阅赔率，仅按 league 订阅；这里固定返回空数组
+        return [];
     }, [type, matchList]);
 
     const { connected: wsConnected } = useOddsSocket({
@@ -644,24 +740,101 @@ export default function SoccerEarlyMarketPage() {
         leagueId: selectedLeague?.leagueId ?? null,
         onOddsUpdate: handleOddsUpdate,
         onCornersCards: undefined,
+        onEventResult: handleEventResult,
         onInplayLeagueUpdate: (data) => {
             const list = Array.isArray(data) ? data : (data?.data ?? []);
-            setLeagueList(Array.isArray(list) ? list : []);
-            pushWsConsole({ type: "inplay_league", count: Array.isArray(list) ? list.length : 0 });
+            const count = Array.isArray(list) ? list.length : 0;
+            pushWsConsole({
+                type: "inplay_league",
+                count,
+                detail: {
+                    payloadKeys: data != null && typeof data === "object" ? Object.keys(data) : [],
+                    payloadSample: data != null ? JSON.stringify(data).slice(0, 400) : "",
+                    leagueIds: Array.isArray(list) ? list.map((l) => l?.leagueId ?? l?.league_id).filter(Boolean) : [],
+                },
+            });
+            getLeagueGroup({
+                baseUrl,
+                userId,
+                type,
+                sportId: 1,
+                day: type === "1" ? undefined : selectedDayTs,
+                daysOfTime: type === "1" ? undefined : 1,
+            })
+                .then((res) => {
+                    const apiList = Array.isArray(res?.data?.data) ? res.data.data : [];
+                    setLeagueList(apiList);
+                    pushWsConsole({
+                        type: "inplay_league",
+                        count: apiList.length,
+                        detail: { afterRefetch: true, apiCount: apiList.length },
+                    });
+                })
+                .catch((err) => {
+                    pushWsConsole({
+                        type: "inplay_league",
+                        count: 0,
+                        detail: { refetchError: err?.message ?? String(err) },
+                    });
+                });
         },
         onLeagueEventsUpdate: (data) => {
             const leagueId = data?.leagueId != null ? String(data.leagueId) : null;
             if (leagueId == null) return;
             const inPlay = data?.data?.inPlay ?? data?.inPlay;
-            const matchCount = Array.isArray(inPlay) ? (inPlay.reduce((acc, g) => acc + (Array.isArray(g?.value) ? g.value.length : 0), 0)) : 0;
-            pushWsConsole({ type: "league", leagueId, matchCount });
-            if (String(selectedLeagueRef.current?.leagueId) !== leagueId) return;
-            setMatchRaw((prev) => {
-                if (!prev) return prev;
-                const nextData = Array.isArray(inPlay) ? { inPlay } : data?.data ?? (data?.inPlay != null ? { inPlay: data.inPlay } : null);
-                if (!nextData || typeof nextData !== "object") return prev;
-                return { ...prev, data: nextData };
+            const matchCount = Array.isArray(inPlay) ? inPlay.reduce((acc, g) => acc + (Array.isArray(g?.value) ? g.value.length : 0), 0) : 0;
+            const eventIdsFromPush = Array.isArray(inPlay) ? inPlay.flatMap((g) => (g?.value ?? []).map((m) => m?.id ?? m?.bet365Id).filter(Boolean)) : [];
+            const isSelected = String(selectedLeagueRef.current?.leagueId) === leagueId;
+            pushWsConsole({
+                type: "league",
+                leagueId,
+                matchCount,
+                detail: {
+                    inPlayGroups: Array.isArray(inPlay) ? inPlay.length : 0,
+                    eventIds: eventIdsFromPush,
+                    payloadKeys: data ? Object.keys(data) : [],
+                    payloadSample: data ? JSON.stringify(data).slice(0, 400) : "",
+                    isSelectedLeague: isSelected,
+                },
             });
+
+            if (!isSelected) return;
+            const league = selectedLeagueRef.current;
+            if (!league?.leagueId) return;
+            getBet365All({
+                baseUrl,
+                userId,
+                day: type === "1" ? undefined : selectedDayTs,
+                leagueIds: league.leagueId,
+                daysOfTime: type === "1" ? undefined : 1,
+            })
+                .then((res) => {
+                    setMatchRaw({
+                        request: {
+                            leagueName: league.leagueName ?? "",
+                            leagueId: league.leagueId ?? "",
+                            day: type === "1" ? undefined : selectedDayTs,
+                            daysOfTime: type === "1" ? undefined : 1,
+                        },
+                        ...res,
+                    });
+                    const apiInPlay = res?.data?.inPlay ?? res?.data?.data?.inPlay ?? res?.inPlay;
+                    const apiCount = Array.isArray(apiInPlay) ? apiInPlay.reduce((a, g) => a + (Array.isArray(g?.value) ? g.value.length : 0), 0) : 0;
+                    pushWsConsole({
+                        type: "league",
+                        leagueId,
+                        matchCount: apiCount,
+                        detail: { afterRefetch: true, apiMatchCount: apiCount },
+                    });
+                })
+                .catch((err) => {
+                    pushWsConsole({
+                        type: "league",
+                        leagueId,
+                        matchCount: 0,
+                        detail: { refetchError: err?.message ?? String(err) },
+                    });
+                });
         },
         userId,
         isDebug: true,
@@ -809,31 +982,38 @@ export default function SoccerEarlyMarketPage() {
             ]);
         } else {
             const { match, mavo, pa, odDecimal } = payload;
-            if (!match?.id || !pa?.id || odDecimal == null) return;
+            const paIdVal = pa?.id ?? pa?.ID;
+            const mavoIdVal = mavo?.id ?? mavo?.ID;
+            if (!match?.id && !match?.bet365Id) return;
+            if (paIdVal == null || paIdVal === "") return;
+            if (odDecimal == null) return;
             // 滚球：赔率里的 at_time 用 mavo.updateAt；timeStr 与 time 同一值
-            const atTime = mavo?.updateAt ?? null;
+            const atTime = mavo?.updateAt ?? mavo?.UpdateAt ?? null;
             const timeStr = atTime != null ? String(atTime) : "";
-            // 滚球：用玩法 id（mavo.id，类似早盘的 938）去 association 里查，不是选项 id(pa.id)
-            const playSmallId = mavo?.id != null ? String(mavo.id) : "";
+            // 滚球：用玩法 id（mavo.id，类似早盘的 938）去 association 里查
+            const playSmallId = mavoIdVal != null ? String(mavoIdVal) : "";
             const assocByType = associationMap.get(5);
             const assoc = assocByType && playSmallId ? assocByType.get(playSmallId) : null;
             const bigTypeName = assoc?.betName ?? "";
             const betPlayName = assoc?.samllName ?? "";
             const betPlayId = assoc != null ? String(assoc.smallId) : playSmallId;
+            const eventIdStr = String(match.id ?? match.bet365Id ?? "");
+            const bet365IdStr = String(match.bet365Id ?? match.id ?? "");
+            const odRaw = pa?.od ?? pa?.OD ?? "";
             setBetSlip((prev) => [
                 ...prev,
                 {
-                    key: `in_${match.id}_${mavo?.id}_${pa.id}_${slipKeyRef.current++}`,
+                    key: `in_${eventIdStr}_${mavoIdVal}_${paIdVal}_${slipKeyRef.current++}`,
                     type: "inplay",
                     match,
                     mavo,
                     pa,
-                    eventId: String(match.id),
-                    bet365Id: String(match.bet365Id ?? match.id),
+                    eventId: eventIdStr,
+                    bet365Id: bet365IdStr,
                     timeType: 1,
-                    oddingId: String(pa.id),
-                    paId: mavo?.id != null ? String(mavo.id) : "",
-                    handicap: pa.ha != null ? String(pa.ha) : "",
+                    oddingId: String(paIdVal),
+                    paId: mavoIdVal != null ? String(mavoIdVal) : "",
+                    handicap: (pa?.ha ?? pa?.HA) != null ? String(pa.ha ?? pa.HA) : "",
                     odds: odDecimal,
                     oddsMarkets: "inplay",
                     betPlayId,
@@ -841,7 +1021,7 @@ export default function SoccerEarlyMarketPage() {
                     bigTypeName,
                     at_time: atTime,
                     timeStr,
-                    selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${mavo?.na || ""} ${(pa.na || pa.pNa) || ""} @${pa.od}`,
+                    selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${mavo?.na ?? mavo?.NA ?? ""} ${(pa?.na ?? pa?.pNa ?? pa?.NA) ?? ""} @${odRaw}`,
                 },
             ]);
         }
@@ -928,10 +1108,13 @@ export default function SoccerEarlyMarketPage() {
         setSubmitError("");
         setSubmitLoading(true);
         try {
-            const betOrderList = betSlip.map((s) => ({
-                ...slipToBetOrder(s),
-                betAmount: amount,
-            }));
+            const betOrderList = betSlip.map((s) => {
+                const order = { ...slipToBetOrder(s), betAmount: amount };
+                if (s.type === "inplay" && (!order.bet365Id || !order.paId)) {
+                    console.warn("[下单] 滚球单缺少 bet365Id 或 paId", { slipItem: s, order });
+                }
+                return order;
+            });
             if (betSlip.length === 1) {
                 const res = await createOrder({
                     baseUrl,
@@ -939,8 +1122,11 @@ export default function SoccerEarlyMarketPage() {
                     betOrder: { ...betOrderList[0] },
                     isBestOdd: isBestOdd,
                 });
-                if (res?.data?.code !== 0 && res?.data?.code !== undefined) {
-                    throw new Error(res?.data?.msg || "下单失败");
+                const code = res?.data?.code;
+                const msg = res?.data?.msg ?? res?.data?.message;
+                if (code != null && code !== 0) {
+                    console.error("[下单失败] 单笔", res?.data, "请求体", betOrderList[0]);
+                    throw new Error(msg || "下单失败");
                 }
             } else {
                 const res = await createContactOrder({
@@ -949,8 +1135,11 @@ export default function SoccerEarlyMarketPage() {
                     betOrderList,
                     isBestOdd: isBestOdd,
                 });
-                if (res?.data?.code !== 0 && res?.data?.code !== undefined) {
-                    throw new Error(res?.data?.msg || "下单失败");
+                const code = res?.data?.code;
+                const msg = res?.data?.msg ?? res?.data?.message;
+                if (code != null && code !== 0) {
+                    console.error("[下单失败] 串关", res?.data, "请求体", betOrderList);
+                    throw new Error(msg || "下单失败");
                 }
             }
             setBetSlip([]);
@@ -959,7 +1148,9 @@ export default function SoccerEarlyMarketPage() {
             loadOrderList(orderListTab);
             loadOrderFlow();
         } catch (err) {
-            setSubmitError(err.message || "下单失败");
+            const message = err?.message || "下单失败";
+            setSubmitError(message);
+            console.error("[下单] 异常", message, err);
         } finally {
             setSubmitLoading(false);
         }
@@ -1579,12 +1770,32 @@ export default function SoccerEarlyMarketPage() {
                                                 {entry.type === "inplay_league" ? (
                                                     <>
                                                         <div style={{ marginBottom: 4, color: "#6b7280" }}>[{entry.ts}] 滚球联赛列表</div>
-                                                        <div style={{ color: "#059669" }}>更新 {entry.count ?? 0} 个联赛</div>
+                                                        <div style={{ color: "#059669", marginBottom: 4 }}>推送 {entry.count ?? 0} 个联赛</div>
+                                                        {entry.detail && (
+                                                            <div style={{ fontSize: 10, color: "#6b7280", whiteSpace: "pre-wrap", wordBreak: "break-all", marginTop: 4, paddingTop: 4, borderTop: "1px solid #e5e7eb" }}>
+                                                                {entry.detail.leagueIds?.length !== undefined && entry.detail.leagueIds.length > 0 && `leagueIds: ${JSON.stringify(entry.detail.leagueIds)}\n`}
+                                                                {entry.detail.payloadKeys?.length ? `payloadKeys: ${entry.detail.payloadKeys.join(", ")}\n` : null}
+                                                                {entry.detail.payloadSample ? `payloadSample: ${entry.detail.payloadSample}\n` : null}
+                                                                {entry.detail.afterRefetch && `已请求 API 刷新，联赛数: ${entry.detail.apiCount ?? entry.count}\n`}
+                                                                {entry.detail.refetchError && `API 刷新失败: ${entry.detail.refetchError}`}
+                                                            </div>
+                                                        )}
                                                     </>
                                                 ) : entry.type === "league" ? (
                                                     <>
                                                         <div style={{ marginBottom: 4, color: "#6b7280" }}>[{entry.ts}] 联赛赛事列表</div>
-                                                        <div style={{ color: "#059669" }}>leagueId={entry.leagueId} 更新 {entry.matchCount ?? 0} 场</div>
+                                                        <div style={{ color: "#059669", marginBottom: 4 }}>leagueId={entry.leagueId} 推送 {entry.matchCount ?? 0} 场</div>
+                                                        {entry.detail && (
+                                                            <div style={{ fontSize: 10, color: "#6b7280", whiteSpace: "pre-wrap", wordBreak: "break-all", marginTop: 4, paddingTop: 4, borderTop: "1px solid #e5e7eb" }}>
+                                                                {entry.detail.isSelectedLeague !== undefined && `当前选中联赛: ${entry.detail.isSelectedLeague}\n`}
+                                                                {entry.detail.inPlayGroups !== undefined && `inPlay 组数: ${entry.detail.inPlayGroups}\n`}
+                                                                {entry.detail.eventIds?.length !== undefined && `eventIds: ${JSON.stringify(entry.detail.eventIds)}\n`}
+                                                                {entry.detail.payloadKeys?.length ? `payloadKeys: ${entry.detail.payloadKeys.join(", ")}\n` : null}
+                                                                {entry.detail.payloadSample ? `payloadSample: ${entry.detail.payloadSample}\n` : null}
+                                                                {entry.detail.afterRefetch && `已请求 API 刷新，赛事数: ${entry.detail.apiMatchCount ?? entry.matchCount}\n`}
+                                                                {entry.detail.refetchError && `API 刷新失败: ${entry.detail.refetchError}`}
+                                                            </div>
+                                                        )}
                                                     </>
                                                 ) : (
                                                     <>
