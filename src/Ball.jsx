@@ -535,6 +535,7 @@ function RollingMarketCell({ mavo, match, onAddSlip, highlight }) {
 export default function SoccerEarlyMarketPage() {
     const [baseUrl, setBaseUrl] = useState("https://ball.skybit.shop");
     const [userId, setUserId] = useState("1000");
+    const [sportId, setSportId] = useState(1);
     const [type, setType] = useState("0");
 
     const [leagueList, setLeagueList] = useState([]);
@@ -757,7 +758,7 @@ export default function SoccerEarlyMarketPage() {
                 baseUrl,
                 userId,
                 type,
-                sportId: 1,
+                sportId,
                 day: type === "1" ? undefined : selectedDayTs,
                 daysOfTime: type === "1" ? undefined : 1,
             })
@@ -857,7 +858,7 @@ export default function SoccerEarlyMarketPage() {
                 baseUrl,
                 userId,
                 type,
-                sportId: 1,
+                sportId,
                 day: type === "1" ? undefined : selectedDayTs,
                 daysOfTime: type === "1" ? undefined : 1,
             });
@@ -911,10 +912,10 @@ export default function SoccerEarlyMarketPage() {
         }
     };
 
-    // 初始加载 + 切换日期/type 时刷新联赛列表
+    // 初始加载 + 切换日期/type/sportId 时刷新联赛列表
     useEffect(() => {
         loadLeagues();
-    }, [selectedDayIndex, type]);
+    }, [selectedDayIndex, type, sportId]);
 
     /** 赔率界面先请求玩法集合（association），再请求联赛/比赛 */
     const loadAssociation = useCallback(async () => {
@@ -1232,6 +1233,25 @@ export default function SoccerEarlyMarketPage() {
                                 outline: "none",
                             }}
                         />
+                    </div>
+
+                    <div>
+                        <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 6 }}>运动类型</div>
+                        <select
+                            value={sportId}
+                            onChange={(e) => setSportId(Number(e.target.value))}
+                            style={{
+                                width: "100%",
+                                height: 40,
+                                borderRadius: 10,
+                                border: "1px solid #d1d5db",
+                                padding: "0 12px",
+                                outline: "none",
+                            }}
+                        >
+                            <option value={1}>1 - 足球</option>
+                            <option value={18}>18 - 篮球</option>
+                        </select>
                     </div>
 
                     <div>
