@@ -957,9 +957,8 @@ export default function SoccerEarlyMarketPage() {
             const bigTypeName = assoc?.betName ?? "";
             const betPlayName = assoc?.samllName ?? _bpName ?? (marketKey ? marketKey.split("_").slice(1).join("_") : "");
             const betPlayId = assoc != null ? String(assoc.smallId) : playSmallId;
-            setBetSlip((prev) => [
-                ...prev,
-                {
+            setBetSlip((prev) => {
+                const nextItem = {
                     key: `pre_${match.id}_${item.id}_${slipKeyRef.current++}`,
                     type: "pre",
                     match,
@@ -979,8 +978,15 @@ export default function SoccerEarlyMarketPage() {
                     at_time: atTime,
                     timeStr,
                     selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${label} ${item.name != null ? item.name : item.handicap} @${item.odds}`,
-                },
-            ]);
+                };
+                const next = [...prev, nextItem];
+                if (hasDuplicateEventIdInSlip(next)) {
+                    setSubmitError("串关不支持同一场比赛选择多个投注项");
+                    return prev;
+                }
+                setSubmitError("");
+                return next;
+            });
         } else {
             const { match, mavo, pa, odDecimal } = payload;
             const paIdVal = pa?.id ?? pa?.ID;
@@ -1001,9 +1007,8 @@ export default function SoccerEarlyMarketPage() {
             const eventIdStr = String(match.id ?? match.bet365Id ?? "");
             const bet365IdStr = String(match.bet365Id ?? match.id ?? "");
             const odRaw = pa?.od ?? pa?.OD ?? "";
-            setBetSlip((prev) => [
-                ...prev,
-                {
+            setBetSlip((prev) => {
+                const nextItem = {
                     key: `in_${eventIdStr}_${mavoIdVal}_${paIdVal}_${slipKeyRef.current++}`,
                     type: "inplay",
                     match,
@@ -1023,12 +1028,30 @@ export default function SoccerEarlyMarketPage() {
                     at_time: atTime,
                     timeStr,
                     selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${mavo?.na ?? mavo?.NA ?? ""} ${(pa?.na ?? pa?.pNa ?? pa?.NA) ?? ""} @${odRaw}`,
-                },
-            ]);
+                };
+                const next = [...prev, nextItem];
+                if (hasDuplicateEventIdInSlip(next)) {
+                    setSubmitError("串关不支持同一场比赛选择多个投注项");
+                    return prev;
+                }
+                setSubmitError("");
+                return next;
+            });
         }
-    }, [associationMap]);
+    }, [associationMap, setSubmitError]);
 
     const removeFromSlip = (key) => setBetSlip((prev) => prev.filter((x) => x.key !== key));
+
+    const hasDuplicateEventIdInSlip = (slip) => {
+        const seen = new Set();
+        for (const item of slip) {
+            const eventId = item?.eventId != null ? String(item.eventId) : "";
+            if (!eventId) continue;
+            if (seen.has(eventId)) return true;
+            seen.add(eventId);
+        }
+        return false;
+    };
 
     const slipToBetOrder = (item) => {
         const base = {
@@ -1107,6 +1130,10 @@ export default function SoccerEarlyMarketPage() {
             return;
         }
         setSubmitError("");
+        if (betSlip.length > 1 && hasDuplicateEventIdInSlip(betSlip)) {
+            setSubmitError("串关不支持同一场比赛选择多个投注项");
+            return;
+        }
         setSubmitLoading(true);
         try {
             const betOrderList = betSlip.map((s) => {
