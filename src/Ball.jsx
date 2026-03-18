@@ -957,6 +957,9 @@ export default function SoccerEarlyMarketPage() {
             const bigTypeName = assoc?.betName ?? "";
             const betPlayName = assoc?.samllName ?? _bpName ?? (marketKey ? marketKey.split("_").slice(1).join("_") : "");
             const betPlayId = assoc != null ? String(assoc.smallId) : playSmallId;
+            // teamType: 按后端 GetTeamType 期望值映射 item.name (1->home, 2->away, X->draw, Over->over, Under->under)
+            const TEAM_TYPE_MAP_PRE = { "1": "home", "2": "away", "X": "draw", "Over": "over", "Under": "under" };
+            const teamType = (item.name != null ? TEAM_TYPE_MAP_PRE[String(item.name)] : undefined) ?? String(item.name ?? "");
             setBetSlip((prev) => {
                 const nextItem = {
                     key: `pre_${match.id}_${item.id}_${slipKeyRef.current++}`,
@@ -974,6 +977,7 @@ export default function SoccerEarlyMarketPage() {
                     betPlayId,
                     betPlayName,
                     bigTypeName,
+                    teamType,
                     oddsMarkets: marketKey,
                     at_time: atTime,
                     timeStr,
@@ -1007,6 +1011,12 @@ export default function SoccerEarlyMarketPage() {
             const eventIdStr = String(match.id ?? match.bet365Id ?? "");
             const bet365IdStr = String(match.bet365Id ?? match.id ?? "");
             const odRaw = pa?.od ?? pa?.OD ?? "";
+            // teamType: 按后端 GetTeamType 期望值映射 pa.na (1->home, 2->away, X->draw, Over->over, Under->under)
+            const TEAM_TYPE_MAP_INPLAY = { "1": "home", "2": "away", "X": "draw", "Over": "over", "Under": "under" };
+            const paNa = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
+            const inplayTeamType = (paNa !== "" ? TEAM_TYPE_MAP_INPLAY[String(paNa)] : undefined) ?? String(paNa);
+            // oddsMarkets: 用 mavo.id 替代固定字符串 "inplay"，使后端能按玩法匹配结算 executor
+            const inplayOddsMarkets = mavoIdVal != null ? String(mavoIdVal) : "inplay";
             setBetSlip((prev) => {
                 const nextItem = {
                     key: `in_${eventIdStr}_${mavoIdVal}_${paIdVal}_${slipKeyRef.current++}`,
@@ -1021,7 +1031,8 @@ export default function SoccerEarlyMarketPage() {
                     paId: mavoIdVal != null ? String(mavoIdVal) : "",
                     handicap: (pa?.ha ?? pa?.HA) != null ? String(pa.ha ?? pa.HA) : "",
                     odds: odDecimal,
-                    oddsMarkets: "inplay",
+                    oddsMarkets: inplayOddsMarkets,
+                    teamType: inplayTeamType,
                     betPlayId,
                     betPlayName,
                     bigTypeName,
@@ -1062,6 +1073,7 @@ export default function SoccerEarlyMarketPage() {
             oddingId: item.oddingId,
             handicap: item.handicap ?? "",
             oddsMarkets: item.oddsMarkets ?? "",
+            teamType: item.teamType ?? "",
             betPlayId: item.betPlayId ?? "",
             betPlayName: item.betPlayName ?? "",
             bigTypeName: item.bigTypeName ?? "",
