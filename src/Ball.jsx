@@ -437,11 +437,40 @@ const HANDICAP_MARKET_IDS = new Set([
     "50346",
 ]);
 
+const GOAL_LINE_MARKET_IDS = new Set([
+    "981",
+    "10143",
+    "50139",
+    "50136",
+    "50266",
+    "10148",
+    "10171",
+    "50285",
+]);
+
+const CORRECT_SCORE_MARKET_IDS = new Set([
+    "43",
+    "10540",
+    "10001",
+    "10561",
+]);
+
 const INPLAY_HANDICAP_MARKET_KEYS = {
     "10147": "10147_Asian Handicap",
     "50281": "50281_Alternative Asian Handicap",
     "10159": "10159_3-Way Handicap",
     "50346": "50346_1st Half - Handicap",
+};
+
+const INPLAY_GOAL_LINE_MARKET_KEYS = {
+    "10148": "10148_Goal Line",
+    "10171": "10171_1st Half Goal Line",
+    "50285": "50285_Alternative Goal Line",
+};
+
+const INPLAY_CORRECT_SCORE_MARKET_KEYS = {
+    "10001": "10001_Final Score",
+    "10561": "10561_Half Time Correct Score",
 };
 
 function getMarketId(marketKey) {
@@ -451,6 +480,14 @@ function getMarketId(marketKey) {
 
 function isHandicapMarket(marketKey) {
     return HANDICAP_MARKET_IDS.has(getMarketId(marketKey));
+}
+
+function isGoalLineMarket(marketKey) {
+    return GOAL_LINE_MARKET_IDS.has(getMarketId(marketKey));
+}
+
+function isCorrectScoreMarket(marketKey) {
+    return CORRECT_SCORE_MARKET_IDS.has(getMarketId(marketKey));
 }
 
 function getMatchTeamNames(match) {
@@ -486,6 +523,10 @@ function getSelectionLabelByTeamType(teamType, match) {
             return getAwayName(match);
         case "X":
             return "平局";
+        case "Over":
+            return "大球";
+        case "Under":
+            return "小球";
         case "1&X":
             return `${getHomeName(match)} / 平局`;
         case "2&X":
@@ -510,6 +551,16 @@ function formatPreSelectionLabel(match, marketKey, item) {
         return selectionLabel || handicap || nameText || "-";
     }
 
+    if (isGoalLineMarket(marketKey)) {
+        if (selectionLabel && nameText) return `${selectionLabel} ${nameText}`;
+        return selectionLabel || nameText || handicap || "-";
+    }
+
+    if (isCorrectScoreMarket(marketKey)) {
+        if (selectionLabel && nameText) return `${selectionLabel} ${nameText}`;
+        return selectionLabel || nameText || "-";
+    }
+
     if (selectionLabel && nameText && selectionCode !== nameText) {
         return `${selectionLabel} ${nameText}`;
     }
@@ -519,14 +570,27 @@ function formatPreSelectionLabel(match, marketKey, item) {
 
 function formatInplaySelectionLabel(match, mavo, pa) {
     const rawName = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
-    const teamType = normalizeTeamType(rawName, match);
+    const marketKey = mavo?.id ?? mavo?.ID;
+    const scoreHeader = isCorrectScoreMarket(marketKey) ? normalizeTeamType(pa?.ha ?? pa?.HA, match) : "";
+    const teamType = scoreHeader || normalizeTeamType(rawName, match);
     const selectionLabel = getSelectionLabelByTeamType(teamType, match) || String(rawName || "").trim();
     const handicap = pa?.ha ?? pa?.HA;
 
-    if (isHandicapMarket(mavo?.id ?? mavo?.ID)) {
+    if (isHandicapMarket(marketKey)) {
         const handicapText = handicap != null ? String(handicap).trim() : "";
         if (selectionLabel && handicapText) return `${selectionLabel} (${handicapText})`;
         return selectionLabel || handicapText || "-";
+    }
+
+    if (isGoalLineMarket(marketKey)) {
+        const handicapText = handicap != null ? String(handicap).trim() : "";
+        if (selectionLabel && handicapText) return `${selectionLabel} ${handicapText}`;
+        return selectionLabel || handicapText || "-";
+    }
+
+    if (isCorrectScoreMarket(marketKey)) {
+        if (selectionLabel && rawName) return `${selectionLabel} ${String(rawName).trim()}`;
+        return selectionLabel || String(rawName || "").trim() || "-";
     }
 
     return selectionLabel || "-";
@@ -534,7 +598,35 @@ function formatInplaySelectionLabel(match, mavo, pa) {
 
 function getInplayOddsMarkets(mavoId) {
     const id = mavoId != null ? String(mavoId) : "";
-    return INPLAY_HANDICAP_MARKET_KEYS[id] ?? id;
+    return INPLAY_HANDICAP_MARKET_KEYS[id]
+        ?? INPLAY_GOAL_LINE_MARKET_KEYS[id]
+        ?? INPLAY_CORRECT_SCORE_MARKET_KEYS[id]
+        ?? id;
+}
+
+function getPreTeamType(marketKey, item, match) {
+    const headerCode = normalizeTeamType(item?.header, match);
+    const nameCode = normalizeTeamType(item?.name, match);
+
+    if (isCorrectScoreMarket(marketKey)) {
+        const score = item?.name != null ? String(item.name).trim() : "";
+        return headerCode && score ? `${headerCode}&${score}` : headerCode || score;
+    }
+
+    return headerCode || nameCode;
+}
+
+function getInplayTeamType(mavo, pa, match) {
+    const marketKey = mavo?.id ?? mavo?.ID;
+    const paName = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
+
+    if (isCorrectScoreMarket(marketKey)) {
+        const scoreHeader = normalizeTeamType(pa?.ha ?? pa?.HA, match);
+        const score = paName != null ? String(paName).trim() : "";
+        return scoreHeader && score ? `${scoreHeader}&${score}` : scoreHeader || score;
+    }
+
+    return normalizeTeamType(paName, match);
 }
 
 /** 新加坡时间当天 0 点的毫秒时间戳 */
@@ -1093,7 +1185,7 @@ export default function SoccerEarlyMarketPage() {
             const betPlayName = assoc?.samllName ?? _bpName ?? (marketKey ? marketKey.split("_").slice(1).join("_") : "");
             const betPlayId = assoc != null ? String(assoc.smallId) : playSmallId;
             // teamType: 按后端 GetTeamType 期望值映射 item.name (1->home, 2->away, X->draw, Over->over, Under->under)
-            const teamType = normalizeTeamType(item?.header, match) || normalizeTeamType(item?.name, match);
+            const teamType = getPreTeamType(marketKey, item, match);
             setBetSlip((prev) => {
                 const selectionLabel = formatPreSelectionLabel(match, marketKey, item);
                 const nextItem = {
@@ -1147,8 +1239,7 @@ export default function SoccerEarlyMarketPage() {
             const bet365IdStr = String(match.bet365Id ?? match.id ?? "");
             const odRaw = pa?.od ?? pa?.OD ?? "";
             // teamType: 按后端 GetTeamType 期望值映射 pa.na (1->home, 2->away, X->draw, Over->over, Under->under)
-            const paNa = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
-            const inplayTeamType = normalizeTeamType(paNa, match);
+            const inplayTeamType = getInplayTeamType(mavo, pa, match);
             const inplayOddsMarkets = mavoIdVal != null ? getInplayOddsMarkets(mavoIdVal) : "inplay";
             setBetSlip((prev) => {
                 const selectionLabel = formatInplaySelectionLabel(match, mavo, pa);
@@ -2122,3 +2213,13 @@ export default function SoccerEarlyMarketPage() {
             </div>
     );
 }
+
+export {
+    formatInplaySelectionLabel,
+    formatPreSelectionLabel,
+    getInplayOddsMarkets,
+    getInplayTeamType,
+    getPreTeamType,
+    getSelectionLabelByTeamType,
+    normalizeTeamType,
+};
