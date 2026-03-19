@@ -389,14 +389,153 @@ function inplayOddsToDecimal(od) {
 
 // 主要玩法展示顺序（bet365 风格）
 const MAIN_MARKET_KEYS = [
-    { key: "40_full_time_result", label: "胜平负" },
-    { key: "938_asian_handicap", label: "亚盘" },
+    { key: "40_full_time_result", label: "独赢" },
+    { key: "938_asian_handicap", label: "让球" },
     { key: "981_goals_over_under", label: "大小球" },
-    { key: "10143_goal_line", label: "球半" },
+    { key: "10143_goal_line", label: "球线" },
     { key: "43_correct_score", label: "波胆" },
-    { key: "1579_half_time_result", label: "半场胜平负" },
+    { key: "1579_half_time_result", label: "半场独赢" },
     { key: "10257_half_time_double_chance", label: "半场双重机会" },
 ];
+
+const TEAM_TYPE_CODE_ALIASES = {
+    "1": "1",
+    "2": "2",
+    X: "X",
+    Draw: "X",
+    draw: "X",
+    Over: "Over",
+    Under: "Under",
+    Yes: "Yes",
+    No: "No",
+    Tie: "Tie",
+    Exactly: "Exactly",
+    Odd: "Odd",
+    Even: "Even",
+    "1X": "1&X",
+    "X1": "1&X",
+    "1&X": "1&X",
+    "X2": "2&X",
+    "2X": "2&X",
+    "2&X": "2&X",
+    "1&2": "1&2",
+    "12": "1&2",
+    "21": "1&2",
+};
+
+const HANDICAP_MARKET_IDS = new Set([
+    "938",
+    "50138",
+    "50137",
+    "50265",
+    "50264",
+    "171",
+    "10204",
+    "10147",
+    "50281",
+    "10159",
+    "50346",
+]);
+
+const INPLAY_HANDICAP_MARKET_KEYS = {
+    "10147": "10147_Asian Handicap",
+    "50281": "50281_Alternative Asian Handicap",
+    "10159": "10159_3-Way Handicap",
+    "50346": "50346_1st Half - Handicap",
+};
+
+function getMarketId(marketKey) {
+    if (marketKey == null || marketKey === "") return "";
+    return String(marketKey).split("_")[0] || "";
+}
+
+function isHandicapMarket(marketKey) {
+    return HANDICAP_MARKET_IDS.has(getMarketId(marketKey));
+}
+
+function getMatchTeamNames(match) {
+    return {
+        home: [getHomeName(match), match?.homeNameEN, match?.homeTeamName, match?.homeName, match?.oHomeName]
+            .filter((value) => value != null && String(value).trim() !== "")
+            .map((value) => String(value).trim().toLowerCase()),
+        away: [getAwayName(match), match?.awayNameEN, match?.awayTeamName, match?.awayName, match?.oAwayName]
+            .filter((value) => value != null && String(value).trim() !== "")
+            .map((value) => String(value).trim().toLowerCase()),
+    };
+}
+
+function normalizeTeamType(value, match) {
+    const raw = value == null ? "" : String(value).trim();
+    if (!raw) return "";
+    if (TEAM_TYPE_CODE_ALIASES[raw]) return TEAM_TYPE_CODE_ALIASES[raw];
+
+    const lower = raw.toLowerCase();
+    const { home, away } = getMatchTeamNames(match);
+    if (home.includes(lower)) return "1";
+    if (away.includes(lower)) return "2";
+    if (lower === "draw") return "X";
+
+    return raw;
+}
+
+function getSelectionLabelByTeamType(teamType, match) {
+    switch (teamType) {
+        case "1":
+            return getHomeName(match);
+        case "2":
+            return getAwayName(match);
+        case "X":
+            return "平局";
+        case "1&X":
+            return `${getHomeName(match)} / 平局`;
+        case "2&X":
+            return `${getAwayName(match)} / 平局`;
+        case "1&2":
+            return `${getHomeName(match)} / ${getAwayName(match)}`;
+        default:
+            return teamType;
+    }
+}
+
+function formatPreSelectionLabel(match, marketKey, item) {
+    const headerCode = normalizeTeamType(item?.header, match);
+    const nameCode = normalizeTeamType(item?.name, match);
+    const selectionCode = headerCode || nameCode;
+    const selectionLabel = getSelectionLabelByTeamType(selectionCode, match);
+    const handicap = item?.handicap != null ? String(item.handicap).trim() : "";
+    const nameText = item?.name != null ? String(item.name).trim() : "";
+
+    if (isHandicapMarket(marketKey)) {
+        if (selectionLabel && handicap) return `${selectionLabel} (${handicap})`;
+        return selectionLabel || handicap || nameText || "-";
+    }
+
+    if (selectionLabel && nameText && selectionCode !== nameText) {
+        return `${selectionLabel} ${nameText}`;
+    }
+
+    return selectionLabel || nameText || handicap || "-";
+}
+
+function formatInplaySelectionLabel(match, mavo, pa) {
+    const rawName = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
+    const teamType = normalizeTeamType(rawName, match);
+    const selectionLabel = getSelectionLabelByTeamType(teamType, match) || String(rawName || "").trim();
+    const handicap = pa?.ha ?? pa?.HA;
+
+    if (isHandicapMarket(mavo?.id ?? mavo?.ID)) {
+        const handicapText = handicap != null ? String(handicap).trim() : "";
+        if (selectionLabel && handicapText) return `${selectionLabel} (${handicapText})`;
+        return selectionLabel || handicapText || "-";
+    }
+
+    return selectionLabel || "-";
+}
+
+function getInplayOddsMarkets(mavoId) {
+    const id = mavoId != null ? String(mavoId) : "";
+    return INPLAY_HANDICAP_MARKET_KEYS[id] ?? id;
+}
 
 /** 新加坡时间当天 0 点的毫秒时间戳 */
 function getStartOfDaySingapore(date) {
@@ -457,8 +596,7 @@ function MarketOddsCell({ marketKey, label, oddsObj, match, onAddSlip }) {
                             cursor: onAddSlip ? "pointer" : "default",
                         }}
                     >
-                        {item.header ? `${item.header} ` : ""}
-                        {item.name != null ? item.name : item.handicap}
+                        {formatPreSelectionLabel(match, marketKey, item)}
                         <span style={{ marginLeft: 6, fontWeight: 600 }}>{item.odds}</span>
                     </span>
                 ))}
@@ -519,10 +657,7 @@ function RollingMarketCell({ mavo, match, onAddSlip, highlight }) {
                                 cursor: canAdd ? "pointer" : "default",
                             }}
                         >
-                            {(pa.na != null && pa.na !== "") ? pa.na : (pa.pNa != null ? pa.pNa : (pa.NA != null ? pa.NA : "-"))}
-                            {(pa.ha != null && String(pa.ha).trim() !== "") || (pa.HA != null && String(pa.HA).trim() !== "") ? (
-                                <span style={{ color: "#6b7280", marginLeft: 4 }}>({pa.ha ?? pa.HA})</span>
-                            ) : null}
+                            {formatInplaySelectionLabel(match, mavo, pa)}
                             <span style={{ marginLeft: 6, fontWeight: 600 }}>{displayOdds}</span>
                         </span>
                     );
@@ -958,9 +1093,9 @@ export default function SoccerEarlyMarketPage() {
             const betPlayName = assoc?.samllName ?? _bpName ?? (marketKey ? marketKey.split("_").slice(1).join("_") : "");
             const betPlayId = assoc != null ? String(assoc.smallId) : playSmallId;
             // teamType: 按后端 GetTeamType 期望值映射 item.name (1->home, 2->away, X->draw, Over->over, Under->under)
-            const TEAM_TYPE_MAP_PRE = { "1": "home", "2": "away", "X": "draw", "Over": "over", "Under": "under" };
-            const teamType = (item.name != null ? TEAM_TYPE_MAP_PRE[String(item.name)] : undefined) ?? String(item.name ?? "");
+            const teamType = normalizeTeamType(item?.header, match) || normalizeTeamType(item?.name, match);
             setBetSlip((prev) => {
+                const selectionLabel = formatPreSelectionLabel(match, marketKey, item);
                 const nextItem = {
                     key: `pre_${match.id}_${item.id}_${slipKeyRef.current++}`,
                     type: "pre",
@@ -981,7 +1116,7 @@ export default function SoccerEarlyMarketPage() {
                     oddsMarkets: marketKey,
                     at_time: atTime,
                     timeStr,
-                    selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${label} ${item.name != null ? item.name : item.handicap} @${item.odds}`,
+                    selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${label} ${selectionLabel} @${item.odds}`,
                 };
                 const next = [...prev, nextItem];
                 if (hasDuplicateEventIdInSlip(next)) {
@@ -1012,12 +1147,11 @@ export default function SoccerEarlyMarketPage() {
             const bet365IdStr = String(match.bet365Id ?? match.id ?? "");
             const odRaw = pa?.od ?? pa?.OD ?? "";
             // teamType: 按后端 GetTeamType 期望值映射 pa.na (1->home, 2->away, X->draw, Over->over, Under->under)
-            const TEAM_TYPE_MAP_INPLAY = { "1": "home", "2": "away", "X": "draw", "Over": "over", "Under": "under" };
             const paNa = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
-            const inplayTeamType = (paNa !== "" ? TEAM_TYPE_MAP_INPLAY[String(paNa)] : undefined) ?? String(paNa);
-            // oddsMarkets: 用 mavo.id 替代固定字符串 "inplay"，使后端能按玩法匹配结算 executor
-            const inplayOddsMarkets = mavoIdVal != null ? String(mavoIdVal) : "inplay";
+            const inplayTeamType = normalizeTeamType(paNa, match);
+            const inplayOddsMarkets = mavoIdVal != null ? getInplayOddsMarkets(mavoIdVal) : "inplay";
             setBetSlip((prev) => {
+                const selectionLabel = formatInplaySelectionLabel(match, mavo, pa);
                 const nextItem = {
                     key: `in_${eventIdStr}_${mavoIdVal}_${paIdVal}_${slipKeyRef.current++}`,
                     type: "inplay",
@@ -1038,7 +1172,7 @@ export default function SoccerEarlyMarketPage() {
                     bigTypeName,
                     at_time: atTime,
                     timeStr,
-                    selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${mavo?.na ?? mavo?.NA ?? ""} ${(pa?.na ?? pa?.pNa ?? pa?.NA) ?? ""} @${odRaw}`,
+                    selectionText: `${getHomeName(match)} vs ${getAwayName(match)} ${mavo?.na ?? mavo?.NA ?? ""} ${selectionLabel} @${odRaw}`,
                 };
                 const next = [...prev, nextItem];
                 if (hasDuplicateEventIdInSlip(next)) {
