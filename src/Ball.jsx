@@ -390,12 +390,19 @@ function inplayOddsToDecimal(od) {
 // 主要玩法展示顺序（bet365 风格）
 const MAIN_MARKET_KEYS = [
     { key: "40_full_time_result", label: "独赢" },
+    { key: "10114_double_chance", label: "双重机会" },
     { key: "938_asian_handicap", label: "让球" },
     { key: "981_goals_over_under", label: "大小球" },
     { key: "10143_goal_line", label: "球线" },
     { key: "43_correct_score", label: "波胆" },
     { key: "1579_half_time_result", label: "半场独赢" },
     { key: "10257_half_time_double_chance", label: "半场双重机会" },
+    { key: "760_corners", label: "角球大小球" },
+    { key: "10539_first_half_corners", label: "半场角球大小球" },
+    { key: "10164_asian_total_corners", label: "亚洲角球大小球" },
+    { key: "10535_corner_handicap", label: "角球让球" },
+    { key: "10165_asian_handicap_corners", label: "亚洲角球让球" },
+    { key: "1175_corner_match_bet", label: "角球独赢" },
 ];
 
 const TEAM_TYPE_CODE_ALIASES = {
@@ -414,14 +421,23 @@ const TEAM_TYPE_CODE_ALIASES = {
     Even: "Even",
     "1X": "1&X",
     "X1": "1&X",
+    "1/X": "1&X",
     "1&X": "1&X",
-    "X2": "2&X",
-    "2X": "2&X",
-    "2&X": "2&X",
+    "X2": "X&2",
+    "2X": "X&2",
+    "X/2": "X&2",
+    "X&2": "X&2",
+    "2&X": "X&2",
     "1&2": "1&2",
     "12": "1&2",
+    "1/2": "1&2",
     "21": "1&2",
 };
+
+const DOUBLE_CHANCE_MARKET_IDS = new Set([
+    "10114",
+    "10257",
+]);
 
 const HANDICAP_MARKET_IDS = new Set([
     "938",
@@ -435,6 +451,8 @@ const HANDICAP_MARKET_IDS = new Set([
     "50281",
     "10159",
     "50346",
+    "10535",
+    "10165",
 ]);
 
 const GOAL_LINE_MARKET_IDS = new Set([
@@ -446,6 +464,9 @@ const GOAL_LINE_MARKET_IDS = new Set([
     "10148",
     "10171",
     "50285",
+    "760",
+    "10539",
+    "10164",
 ]);
 
 const CORRECT_SCORE_MARKET_IDS = new Set([
@@ -484,6 +505,10 @@ function isHandicapMarket(marketKey) {
 
 function isGoalLineMarket(marketKey) {
     return GOAL_LINE_MARKET_IDS.has(getMarketId(marketKey));
+}
+
+function isDoubleChanceMarket(marketKey) {
+    return DOUBLE_CHANCE_MARKET_IDS.has(getMarketId(marketKey));
 }
 
 function isCorrectScoreMarket(marketKey) {
@@ -527,8 +552,12 @@ function getSelectionLabelByTeamType(teamType, match) {
             return "大球";
         case "Under":
             return "小球";
+        case "Exactly":
+            return "等于";
         case "1&X":
             return `${getHomeName(match)} / 平局`;
+        case "X&2":
+            return `平局 / ${getAwayName(match)}`;
         case "2&X":
             return `${getAwayName(match)} / 平局`;
         case "1&2":
@@ -561,6 +590,10 @@ function formatPreSelectionLabel(match, marketKey, item) {
         return selectionLabel || nameText || "-";
     }
 
+    if (isDoubleChanceMarket(marketKey)) {
+        return selectionLabel || nameText || "-";
+    }
+
     if (selectionLabel && nameText && selectionCode !== nameText) {
         return `${selectionLabel} ${nameText}`;
     }
@@ -590,6 +623,10 @@ function formatInplaySelectionLabel(match, mavo, pa) {
 
     if (isCorrectScoreMarket(marketKey)) {
         if (selectionLabel && rawName) return `${selectionLabel} ${String(rawName).trim()}`;
+        return selectionLabel || String(rawName || "").trim() || "-";
+    }
+
+    if (isDoubleChanceMarket(marketKey)) {
         return selectionLabel || String(rawName || "").trim() || "-";
     }
 

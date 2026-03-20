@@ -4,6 +4,7 @@ import {
     getInplayOddsMarkets,
     getInplayTeamType,
     getPreTeamType,
+    normalizeTeamType,
 } from "./Ball";
 
 const match = {
@@ -42,5 +43,30 @@ describe("Ball market helpers", () => {
 
         expect(getInplayTeamType(mavo, pa, match)).toBe("2&1-0");
         expect(formatInplaySelectionLabel(match, mavo, pa)).toBe("客队B 1-0");
+    });
+
+    test("双重机会早盘统一 teamType 编码，并显示中文组合", () => {
+        const fullTime = { name: "X2", odds: "1.45" };
+        const halfTime = { name: "1X", odds: "1.33" };
+
+        expect(getPreTeamType("10114_double_chance", fullTime, match)).toBe("X&2");
+        expect(getPreTeamType("10257_half_time_double_chance", halfTime, match)).toBe("1&X");
+        expect(formatPreSelectionLabel(match, "10114_double_chance", fullTime)).toBe("平局 / 客队B");
+        expect(formatPreSelectionLabel(match, "10257_half_time_double_chance", halfTime)).toBe("主队A / 平局");
+    });
+
+    test("角球玩法沿用让球/大小球格式，确保展示和 teamType 可下单", () => {
+        const cornerGoalLine = { header: "Under", name: "9.5", odds: "1.90" };
+        const cornerHandicap = { header: "主队A", handicap: "-1.5", odds: "1.88" };
+
+        expect(getPreTeamType("760_corners", cornerGoalLine, match)).toBe("Under");
+        expect(formatPreSelectionLabel(match, "760_corners", cornerGoalLine)).toBe("小球 9.5");
+        expect(getPreTeamType("10535_corner_handicap", cornerHandicap, match)).toBe("1");
+        expect(formatPreSelectionLabel(match, "10535_corner_handicap", cornerHandicap)).toBe("主队A (-1.5)");
+    });
+
+    test("双重机会历史编码兼容 2&X 并统一到 X&2", () => {
+        expect(normalizeTeamType("2&X", match)).toBe("X&2");
+        expect(normalizeTeamType("X2", match)).toBe("X&2");
     });
 });
