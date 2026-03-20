@@ -4,6 +4,7 @@ import {
     getInplayOddsMarkets,
     getInplayTeamType,
     getPreTeamType,
+    isSingleOnlyMarket,
     normalizeTeamType,
 } from "./Ball";
 
@@ -31,6 +32,11 @@ describe("Ball market helpers", () => {
     });
 
     test("滚球大小球和波胆映射到后端结算 key", () => {
+        expect(getInplayOddsMarkets("1786")).toBe("1786_To Qualify");
+        expect(getInplayOddsMarkets("50169")).toBe("50169_Extra Time Result");
+        expect(getInplayOddsMarkets("439")).toBe("439_Extra Time Asian Handicap");
+        expect(getInplayOddsMarkets("430")).toBe("430_Extra Time Goal Line");
+        expect(getInplayOddsMarkets("50591")).toBe("50591_Extra Time Final Score");
         expect(getInplayOddsMarkets("10148")).toBe("10148_Goal Line");
         expect(getInplayOddsMarkets("10171")).toBe("10171_1st Half Goal Line");
         expect(getInplayOddsMarkets("10001")).toBe("10001_Final Score");
@@ -55,6 +61,25 @@ describe("Ball market helpers", () => {
         expect(formatPreSelectionLabel(match, "10257_half_time_double_chance", halfTime)).toBe("主队A / 平局");
     });
 
+    test("晋级玩法使用 1/2 teamType 并展示球队名", () => {
+        const qualify = { name: "主队A", odds: "1.70" };
+
+        expect(getPreTeamType("1094_to_qualify", qualify, match)).toBe("1");
+        expect(formatPreSelectionLabel(match, "1094_to_qualify", qualify)).toBe("主队A");
+    });
+
+    test("加时让球与加时波胆沿用让球/波胆编码规则", () => {
+        const handicapMavo = { id: "439" };
+        const handicapPa = { na: "主队A", ha: "-0.5" };
+        const scoreMavo = { id: "50591" };
+        const scorePa = { ha: "1", na: "2-1" };
+
+        expect(getInplayTeamType(handicapMavo, handicapPa, match)).toBe("1");
+        expect(formatInplaySelectionLabel(match, handicapMavo, handicapPa)).toBe("主队A (-0.5)");
+        expect(getInplayTeamType(scoreMavo, scorePa, match)).toBe("1&2-1");
+        expect(formatInplaySelectionLabel(match, scoreMavo, scorePa)).toBe("主队A 2-1");
+    });
+
     test("角球玩法沿用让球/大小球格式，确保展示和 teamType 可下单", () => {
         const cornerGoalLine = { header: "Under", name: "9.5", odds: "1.90" };
         const cornerHandicap = { header: "主队A", handicap: "-1.5", odds: "1.88" };
@@ -68,5 +93,12 @@ describe("Ball market helpers", () => {
     test("双重机会历史编码兼容 2&X 并统一到 X&2", () => {
         expect(normalizeTeamType("2&X", match)).toBe("X&2");
         expect(normalizeTeamType("X2", match)).toBe("X&2");
+    });
+
+    test("冠军/晋级 market id 标记为仅支持单关", () => {
+        expect(isSingleOnlyMarket("1094_to_qualify")).toBe(true);
+        expect(isSingleOnlyMarket("1786_To Qualify")).toBe(true);
+        expect(isSingleOnlyMarket("10116_to_win_the_trophy")).toBe(true);
+        expect(isSingleOnlyMarket("40_full_time_result")).toBe(false);
     });
 });

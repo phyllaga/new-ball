@@ -391,10 +391,19 @@ function inplayOddsToDecimal(od) {
 const MAIN_MARKET_KEYS = [
     { key: "40_full_time_result", label: "独赢" },
     { key: "10114_double_chance", label: "双重机会" },
+    { key: "1094_to_qualify", label: "晋级" },
+    { key: "10116_to_win_the_trophy", label: "冠军" },
     { key: "938_asian_handicap", label: "让球" },
     { key: "981_goals_over_under", label: "大小球" },
     { key: "10143_goal_line", label: "球线" },
     { key: "43_correct_score", label: "波胆" },
+    { key: "50169_extra_time_result", label: "加时独赢" },
+    { key: "50191_extra_time_1st_half_result", label: "加时上半场独赢" },
+    { key: "439_extra_time_asian_handicap", label: "加时让球" },
+    { key: "430_extra_time_goal_line", label: "加时大小球" },
+    { key: "50386_extra_time_1st_half_goals", label: "加时上半场大小球" },
+    { key: "50590_extra_time_half_time_score", label: "加时上半场波胆" },
+    { key: "50591_extra_time_final_score", label: "加时波胆" },
     { key: "1579_half_time_result", label: "半场独赢" },
     { key: "10257_half_time_double_chance", label: "半场双重机会" },
     { key: "760_corners", label: "角球大小球" },
@@ -437,10 +446,12 @@ const TEAM_TYPE_CODE_ALIASES = {
 const DOUBLE_CHANCE_MARKET_IDS = new Set([
     "10114",
     "10257",
+    "50190",
 ]);
 
 const HANDICAP_MARKET_IDS = new Set([
     "938",
+    "439",
     "50138",
     "50137",
     "50265",
@@ -457,6 +468,8 @@ const HANDICAP_MARKET_IDS = new Set([
 
 const GOAL_LINE_MARKET_IDS = new Set([
     "981",
+    "430",
+    "50386",
     "10143",
     "50139",
     "50136",
@@ -471,12 +484,28 @@ const GOAL_LINE_MARKET_IDS = new Set([
 
 const CORRECT_SCORE_MARKET_IDS = new Set([
     "43",
+    "50590",
+    "50591",
     "10540",
     "10001",
     "10561",
 ]);
 
+const SINGLE_ONLY_MARKET_IDS = new Set([
+    "1094",
+    "1786",
+    "10116",
+]);
+
+const INPLAY_RESULT_MARKET_KEYS = {
+    "1786": "1786_To Qualify",
+    "50169": "50169_Extra Time Result",
+    "50191": "50191_Extra Time 1st Half Result",
+    "50190": "50190_Extra Time Double Result",
+};
+
 const INPLAY_HANDICAP_MARKET_KEYS = {
+    "439": "439_Extra Time Asian Handicap",
     "10147": "10147_Asian Handicap",
     "50281": "50281_Alternative Asian Handicap",
     "10159": "10159_3-Way Handicap",
@@ -484,12 +513,16 @@ const INPLAY_HANDICAP_MARKET_KEYS = {
 };
 
 const INPLAY_GOAL_LINE_MARKET_KEYS = {
+    "430": "430_Extra Time Goal Line",
+    "50386": "50386_Extra Time 1st Half Goals",
     "10148": "10148_Goal Line",
     "10171": "10171_1st Half Goal Line",
     "50285": "50285_Alternative Goal Line",
 };
 
 const INPLAY_CORRECT_SCORE_MARKET_KEYS = {
+    "50590": "50590_Extra Time Half Time Score",
+    "50591": "50591_Extra Time Final Score",
     "10001": "10001_Final Score",
     "10561": "10561_Half Time Correct Score",
 };
@@ -497,6 +530,28 @@ const INPLAY_CORRECT_SCORE_MARKET_KEYS = {
 function getMarketId(marketKey) {
     if (marketKey == null || marketKey === "") return "";
     return String(marketKey).split("_")[0] || "";
+}
+
+function isSingleOnlyMarket(marketKey) {
+    return SINGLE_ONLY_MARKET_IDS.has(getMarketId(marketKey));
+}
+
+function resolvePreMarket(matchOdds, marketKey) {
+    if (!matchOdds || typeof matchOdds !== "object") {
+        return { resolvedMarketKey: marketKey, oddsObj: null };
+    }
+    if (matchOdds[marketKey]) {
+        return { resolvedMarketKey: marketKey, oddsObj: matchOdds[marketKey] };
+    }
+    const targetMarketId = getMarketId(marketKey);
+    if (!targetMarketId) {
+        return { resolvedMarketKey: marketKey, oddsObj: null };
+    }
+    const matchedKey = Object.keys(matchOdds).find((k) => getMarketId(k) === targetMarketId);
+    if (!matchedKey) {
+        return { resolvedMarketKey: marketKey, oddsObj: null };
+    }
+    return { resolvedMarketKey: matchedKey, oddsObj: matchOdds[matchedKey] };
 }
 
 function isHandicapMarket(marketKey) {
@@ -594,6 +649,10 @@ function formatPreSelectionLabel(match, marketKey, item) {
         return selectionLabel || nameText || "-";
     }
 
+    if (selectionLabel && nameText && normalizeTeamType(nameText, match) === selectionCode) {
+        return selectionLabel;
+    }
+
     if (selectionLabel && nameText && selectionCode !== nameText) {
         return `${selectionLabel} ${nameText}`;
     }
@@ -635,7 +694,8 @@ function formatInplaySelectionLabel(match, mavo, pa) {
 
 function getInplayOddsMarkets(mavoId) {
     const id = mavoId != null ? String(mavoId) : "";
-    return INPLAY_HANDICAP_MARKET_KEYS[id]
+    return INPLAY_RESULT_MARKET_KEYS[id]
+        ?? INPLAY_HANDICAP_MARKET_KEYS[id]
         ?? INPLAY_GOAL_LINE_MARKET_KEYS[id]
         ?? INPLAY_CORRECT_SCORE_MARKET_KEYS[id]
         ?? id;
@@ -1252,6 +1312,10 @@ export default function SoccerEarlyMarketPage() {
                     setSubmitError("串关不支持同一场比赛选择多个投注项");
                     return prev;
                 }
+                if (next.length > 1 && hasSingleOnlyMarketInSlip(next)) {
+                    setSubmitError("冠军/晋级玩法仅支持单关，不能串关");
+                    return prev;
+                }
                 setSubmitError("");
                 return next;
             });
@@ -1307,6 +1371,10 @@ export default function SoccerEarlyMarketPage() {
                     setSubmitError("串关不支持同一场比赛选择多个投注项");
                     return prev;
                 }
+                if (next.length > 1 && hasSingleOnlyMarketInSlip(next)) {
+                    setSubmitError("冠军/晋级玩法仅支持单关，不能串关");
+                    return prev;
+                }
                 setSubmitError("");
                 return next;
             });
@@ -1324,6 +1392,14 @@ export default function SoccerEarlyMarketPage() {
             seen.add(eventId);
         }
         return false;
+    };
+
+    const hasSingleOnlyMarketInSlip = (slip) => {
+        if (!Array.isArray(slip)) return false;
+        return slip.some((item) => {
+            const marketKey = item?.marketKey ?? item?.oddsMarkets ?? item?.mavo?.id ?? item?.mavo?.ID ?? item?.paId ?? "";
+            return isSingleOnlyMarket(marketKey);
+        });
     };
 
     const slipToBetOrder = (item) => {
@@ -1406,6 +1482,10 @@ export default function SoccerEarlyMarketPage() {
         setSubmitError("");
         if (betSlip.length > 1 && hasDuplicateEventIdInSlip(betSlip)) {
             setSubmitError("串关不支持同一场比赛选择多个投注项");
+            return;
+        }
+        if (betSlip.length > 1 && hasSingleOnlyMarketInSlip(betSlip)) {
+            setSubmitError("冠军/晋级玩法仅支持单关，不能串关");
             return;
         }
         setSubmitLoading(true);
@@ -1869,11 +1949,11 @@ export default function SoccerEarlyMarketPage() {
                                                 }}
                                             >
                                                 {MAIN_MARKET_KEYS.map(({ key: mk, label }) => {
-                                                    const oddsObj = match?.odds?.[mk];
+                                                    const { resolvedMarketKey, oddsObj } = resolvePreMarket(match?.odds, mk);
                                                     return (
                                                         <MarketOddsCell
-                                                            key={mk}
-                                                            marketKey={mk}
+                                                            key={`${mk}_${resolvedMarketKey}`}
+                                                            marketKey={resolvedMarketKey}
                                                             label={label}
                                                             oddsObj={oddsObj}
                                                             match={match}
@@ -2257,6 +2337,7 @@ export {
     getInplayOddsMarkets,
     getInplayTeamType,
     getPreTeamType,
+    isSingleOnlyMarket,
     getSelectionLabelByTeamType,
     normalizeTeamType,
 };
