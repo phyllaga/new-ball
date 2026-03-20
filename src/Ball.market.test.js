@@ -33,10 +33,15 @@ describe("Ball market helpers", () => {
 
     test("滚球大小球和波胆映射到后端结算 key", () => {
         expect(getInplayOddsMarkets("1786")).toBe("1786_To Qualify");
+        expect(getInplayOddsMarkets("10560")).toBe("10560_Half Time/Full Time");
         expect(getInplayOddsMarkets("50169")).toBe("50169_Extra Time Result");
         expect(getInplayOddsMarkets("439")).toBe("439_Extra Time Asian Handicap");
         expect(getInplayOddsMarkets("430")).toBe("430_Extra Time Goal Line");
         expect(getInplayOddsMarkets("50591")).toBe("50591_Extra Time Final Score");
+        expect(getInplayOddsMarkets("50151")).toBe("50151_To Win Shootout");
+        expect(getInplayOddsMarkets("440")).toBe("440_Asian Handicap - Penalties converted in Shootout");
+        expect(getInplayOddsMarkets("431")).toBe("431_Goal Line - Penalties Converted in Shootout");
+        expect(getInplayOddsMarkets("50275")).toBe("50275_Shootout Correct Score");
         expect(getInplayOddsMarkets("10148")).toBe("10148_Goal Line");
         expect(getInplayOddsMarkets("10171")).toBe("10171_1st Half Goal Line");
         expect(getInplayOddsMarkets("10001")).toBe("10001_Final Score");
@@ -78,6 +83,31 @@ describe("Ball market helpers", () => {
         expect(formatInplaySelectionLabel(match, handicapMavo, handicapPa)).toBe("主队A (-0.5)");
         expect(getInplayTeamType(scoreMavo, scorePa, match)).toBe("1&2-1");
         expect(formatInplaySelectionLabel(match, scoreMavo, scorePa)).toBe("主队A 2-1");
+    });
+
+    test("半全场玩法把名称组合转为 1/X/2 的 teamType", () => {
+        const preItem = { name: "主队A - 平局", odds: "6.0" };
+        const inplayMavo = { id: "10560" };
+        const inplayPa = { na: "Draw - 客队B" };
+
+        expect(getPreTeamType("42_half_time_full_time", preItem, match)).toBe("1&X");
+        expect(formatPreSelectionLabel(match, "42_half_time_full_time", preItem)).toBe("主队A / 平局");
+        expect(getInplayTeamType(inplayMavo, inplayPa, match)).toBe("X&2");
+        expect(formatInplaySelectionLabel(match, inplayMavo, inplayPa)).toBe("平局 / 客队B");
+    });
+
+    test("点球主玩法沿用独赢/让球/大小球/波胆编码", () => {
+        const shootoutResult = { id: "50151" };
+        const shootoutHandicap = { id: "440" };
+        const shootoutGoalLine = { id: "431" };
+        const shootoutScore = { id: "50275" };
+
+        expect(getInplayTeamType(shootoutResult, { na: "主队A" }, match)).toBe("1");
+        expect(formatInplaySelectionLabel(match, shootoutResult, { na: "主队A" })).toBe("主队A");
+        expect(getInplayTeamType(shootoutHandicap, { na: "客队B", ha: "+0.5" }, match)).toBe("2");
+        expect(formatInplaySelectionLabel(match, shootoutHandicap, { na: "客队B", ha: "+0.5" })).toBe("客队B (+0.5)");
+        expect(formatInplaySelectionLabel(match, shootoutGoalLine, { na: "Under", ha: "7.5" })).toBe("小球 7.5");
+        expect(getInplayTeamType(shootoutScore, { ha: "1", na: "4-3" }, match)).toBe("1&4-3");
     });
 
     test("角球玩法沿用让球/大小球格式，确保展示和 teamType 可下单", () => {

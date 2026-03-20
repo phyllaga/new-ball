@@ -391,6 +391,7 @@ function inplayOddsToDecimal(od) {
 const MAIN_MARKET_KEYS = [
     { key: "40_full_time_result", label: "独赢" },
     { key: "10114_double_chance", label: "双重机会" },
+    { key: "42_half_time_full_time", label: "半全场" },
     { key: "1094_to_qualify", label: "晋级" },
     { key: "10116_to_win_the_trophy", label: "冠军" },
     { key: "938_asian_handicap", label: "让球" },
@@ -404,6 +405,10 @@ const MAIN_MARKET_KEYS = [
     { key: "50386_extra_time_1st_half_goals", label: "加时上半场大小球" },
     { key: "50590_extra_time_half_time_score", label: "加时上半场波胆" },
     { key: "50591_extra_time_final_score", label: "加时波胆" },
+    { key: "50151_to_win_shootout", label: "点球独赢" },
+    { key: "440_asian_handicap_penalties_converted_in_shootout", label: "点球让球" },
+    { key: "431_goal_line_penalties_converted_in_shootout", label: "点球大小球" },
+    { key: "50275_shootout_correct_score", label: "点球波胆" },
     { key: "1579_half_time_result", label: "半场独赢" },
     { key: "10257_half_time_double_chance", label: "半场双重机会" },
     { key: "760_corners", label: "角球大小球" },
@@ -420,6 +425,8 @@ const TEAM_TYPE_CODE_ALIASES = {
     X: "X",
     Draw: "X",
     draw: "X",
+    平局: "X",
+    和局: "X",
     Over: "Over",
     Under: "Under",
     Yes: "Yes",
@@ -446,12 +453,18 @@ const TEAM_TYPE_CODE_ALIASES = {
 const DOUBLE_CHANCE_MARKET_IDS = new Set([
     "10114",
     "10257",
+]);
+
+const COMBINED_RESULT_MARKET_IDS = new Set([
+    "42",
+    "10560",
     "50190",
 ]);
 
 const HANDICAP_MARKET_IDS = new Set([
     "938",
     "439",
+    "440",
     "50138",
     "50137",
     "50265",
@@ -469,6 +482,7 @@ const HANDICAP_MARKET_IDS = new Set([
 const GOAL_LINE_MARKET_IDS = new Set([
     "981",
     "430",
+    "431",
     "50386",
     "10143",
     "50139",
@@ -480,12 +494,15 @@ const GOAL_LINE_MARKET_IDS = new Set([
     "760",
     "10539",
     "10164",
+    "50155",
+    "50156",
 ]);
 
 const CORRECT_SCORE_MARKET_IDS = new Set([
     "43",
     "50590",
     "50591",
+    "50275",
     "10540",
     "10001",
     "10561",
@@ -499,13 +516,16 @@ const SINGLE_ONLY_MARKET_IDS = new Set([
 
 const INPLAY_RESULT_MARKET_KEYS = {
     "1786": "1786_To Qualify",
+    "10560": "10560_Half Time/Full Time",
     "50169": "50169_Extra Time Result",
     "50191": "50191_Extra Time 1st Half Result",
     "50190": "50190_Extra Time Double Result",
+    "50151": "50151_To Win Shootout",
 };
 
 const INPLAY_HANDICAP_MARKET_KEYS = {
     "439": "439_Extra Time Asian Handicap",
+    "440": "440_Asian Handicap - Penalties converted in Shootout",
     "10147": "10147_Asian Handicap",
     "50281": "50281_Alternative Asian Handicap",
     "10159": "10159_3-Way Handicap",
@@ -514,15 +534,19 @@ const INPLAY_HANDICAP_MARKET_KEYS = {
 
 const INPLAY_GOAL_LINE_MARKET_KEYS = {
     "430": "430_Extra Time Goal Line",
+    "431": "431_Goal Line - Penalties Converted in Shootout",
     "50386": "50386_Extra Time 1st Half Goals",
     "10148": "10148_Goal Line",
     "10171": "10171_1st Half Goal Line",
     "50285": "50285_Alternative Goal Line",
+    "50155": "50155_Home Penalties Converted in Shootout",
+    "50156": "50156_Away Penalties Converted in Shootout",
 };
 
 const INPLAY_CORRECT_SCORE_MARKET_KEYS = {
     "50590": "50590_Extra Time Half Time Score",
     "50591": "50591_Extra Time Final Score",
+    "50275": "50275_Shootout Correct Score",
     "10001": "10001_Final Score",
     "10561": "10561_Half Time Correct Score",
 };
@@ -566,6 +590,10 @@ function isDoubleChanceMarket(marketKey) {
     return DOUBLE_CHANCE_MARKET_IDS.has(getMarketId(marketKey));
 }
 
+function isCombinedResultMarket(marketKey) {
+    return COMBINED_RESULT_MARKET_IDS.has(getMarketId(marketKey));
+}
+
 function isCorrectScoreMarket(marketKey) {
     return CORRECT_SCORE_MARKET_IDS.has(getMarketId(marketKey));
 }
@@ -595,7 +623,37 @@ function normalizeTeamType(value, match) {
     return raw;
 }
 
+function normalizeCompositeTeamType(value, match) {
+    const raw = value == null ? "" : String(value).trim();
+    if (!raw) return "";
+
+    let parts = null;
+    if (raw.includes(" - ")) {
+        parts = raw.split(" - ");
+    } else if (raw.includes("/")) {
+        parts = raw.split("/");
+    } else if (raw.includes("&")) {
+        parts = raw.split("&");
+    }
+    if (!parts || parts.length !== 2) return "";
+
+    const left = normalizeTeamType(parts[0], match);
+    const right = normalizeTeamType(parts[1], match);
+    const valid = new Set(["1", "2", "X"]);
+    if (!valid.has(left) || !valid.has(right)) return "";
+    return `${left}&${right}`;
+}
+
 function getSelectionLabelByTeamType(teamType, match) {
+    const combo = teamType != null ? String(teamType).split("&") : [];
+    if (combo.length === 2) {
+        const valid = new Set(["1", "2", "X"]);
+        const [left, right] = combo;
+        if (valid.has(left) && valid.has(right)) {
+            return `${getSelectionLabelByTeamType(left, match)} / ${getSelectionLabelByTeamType(right, match)}`;
+        }
+    }
+
     switch (teamType) {
         case "1":
             return getHomeName(match);
@@ -609,14 +667,6 @@ function getSelectionLabelByTeamType(teamType, match) {
             return "小球";
         case "Exactly":
             return "等于";
-        case "1&X":
-            return `${getHomeName(match)} / 平局`;
-        case "X&2":
-            return `平局 / ${getAwayName(match)}`;
-        case "2&X":
-            return `${getAwayName(match)} / 平局`;
-        case "1&2":
-            return `${getHomeName(match)} / ${getAwayName(match)}`;
         default:
             return teamType;
     }
@@ -625,7 +675,8 @@ function getSelectionLabelByTeamType(teamType, match) {
 function formatPreSelectionLabel(match, marketKey, item) {
     const headerCode = normalizeTeamType(item?.header, match);
     const nameCode = normalizeTeamType(item?.name, match);
-    const selectionCode = headerCode || nameCode;
+    const comboCode = isCombinedResultMarket(marketKey) ? normalizeCompositeTeamType(item?.name ?? item?.header, match) : "";
+    const selectionCode = comboCode || headerCode || nameCode;
     const selectionLabel = getSelectionLabelByTeamType(selectionCode, match);
     const handicap = item?.handicap != null ? String(item.handicap).trim() : "";
     const nameText = item?.name != null ? String(item.name).trim() : "";
@@ -649,6 +700,10 @@ function formatPreSelectionLabel(match, marketKey, item) {
         return selectionLabel || nameText || "-";
     }
 
+    if (isCombinedResultMarket(marketKey)) {
+        return selectionLabel || nameText || "-";
+    }
+
     if (selectionLabel && nameText && normalizeTeamType(nameText, match) === selectionCode) {
         return selectionLabel;
     }
@@ -664,7 +719,8 @@ function formatInplaySelectionLabel(match, mavo, pa) {
     const rawName = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
     const marketKey = mavo?.id ?? mavo?.ID;
     const scoreHeader = isCorrectScoreMarket(marketKey) ? normalizeTeamType(pa?.ha ?? pa?.HA, match) : "";
-    const teamType = scoreHeader || normalizeTeamType(rawName, match);
+    const comboCode = isCombinedResultMarket(marketKey) ? normalizeCompositeTeamType(rawName, match) : "";
+    const teamType = scoreHeader || comboCode || normalizeTeamType(rawName, match);
     const selectionLabel = getSelectionLabelByTeamType(teamType, match) || String(rawName || "").trim();
     const handicap = pa?.ha ?? pa?.HA;
 
@@ -689,6 +745,10 @@ function formatInplaySelectionLabel(match, mavo, pa) {
         return selectionLabel || String(rawName || "").trim() || "-";
     }
 
+    if (isCombinedResultMarket(marketKey)) {
+        return selectionLabel || String(rawName || "").trim() || "-";
+    }
+
     return selectionLabel || "-";
 }
 
@@ -704,18 +764,20 @@ function getInplayOddsMarkets(mavoId) {
 function getPreTeamType(marketKey, item, match) {
     const headerCode = normalizeTeamType(item?.header, match);
     const nameCode = normalizeTeamType(item?.name, match);
+    const comboCode = isCombinedResultMarket(marketKey) ? normalizeCompositeTeamType(item?.name ?? item?.header, match) : "";
 
     if (isCorrectScoreMarket(marketKey)) {
         const score = item?.name != null ? String(item.name).trim() : "";
         return headerCode && score ? `${headerCode}&${score}` : headerCode || score;
     }
 
-    return headerCode || nameCode;
+    return comboCode || headerCode || nameCode;
 }
 
 function getInplayTeamType(mavo, pa, match) {
     const marketKey = mavo?.id ?? mavo?.ID;
     const paName = pa?.na ?? pa?.NA ?? pa?.pNa ?? "";
+    const comboCode = isCombinedResultMarket(marketKey) ? normalizeCompositeTeamType(paName, match) : "";
 
     if (isCorrectScoreMarket(marketKey)) {
         const scoreHeader = normalizeTeamType(pa?.ha ?? pa?.HA, match);
@@ -723,7 +785,7 @@ function getInplayTeamType(mavo, pa, match) {
         return scoreHeader && score ? `${scoreHeader}&${score}` : scoreHeader || score;
     }
 
-    return normalizeTeamType(paName, match);
+    return comboCode || normalizeTeamType(paName, match);
 }
 
 /** 新加坡时间当天 0 点的毫秒时间戳 */
