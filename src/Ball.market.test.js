@@ -33,7 +33,13 @@ describe("Ball market helpers", () => {
 
     test("滚球大小球和波胆映射到后端结算 key", () => {
         expect(getInplayOddsMarkets("1786")).toBe("1786_To Qualify");
+        expect(getInplayOddsMarkets("10115")).toBe("10115_Double Chance");
         expect(getInplayOddsMarkets("10560")).toBe("10560_Half Time/Full Time");
+        expect(getInplayOddsMarkets("50246")).toBe("50246_To Win 2nd Half");
+        expect(getInplayOddsMarkets("50390")).toBe("50390_Both Teams to Score in 1st Half");
+        expect(getInplayOddsMarkets("50391")).toBe("50391_Both Teams to Score in 2nd Half");
+        expect(getInplayOddsMarkets("50461")).toBe("50461_Result / Both Teams To Score");
+        expect(getInplayOddsMarkets("10565")).toBe("10565_Both Teams to Score");
         expect(getInplayOddsMarkets("50169")).toBe("50169_Extra Time Result");
         expect(getInplayOddsMarkets("439")).toBe("439_Extra Time Asian Handicap");
         expect(getInplayOddsMarkets("430")).toBe("430_Extra Time Goal Line");
@@ -123,6 +129,26 @@ describe("Ball market helpers", () => {
     test("双重机会历史编码兼容 2&X 并统一到 X&2", () => {
         expect(normalizeTeamType("2&X", match)).toBe("X&2");
         expect(normalizeTeamType("X2", match)).toBe("X&2");
+    });
+
+    test("BTTS 使用 Yes/No 编码并展示中文", () => {
+        const yesItem = { name: "Yes", odds: "1.70" };
+        const noItem = { name: "No", odds: "2.00" };
+
+        expect(getPreTeamType("10150_both_teams_to_score", yesItem, match)).toBe("Yes");
+        expect(getPreTeamType("10150_both_teams_to_score", noItem, match)).toBe("No");
+        expect(formatPreSelectionLabel(match, "10150_both_teams_to_score", yesItem)).toBe("是");
+        expect(formatPreSelectionLabel(match, "10150_both_teams_to_score", noItem)).toBe("否");
+    });
+
+    test("下半场玩法使用独赢/单双编码规则", () => {
+        const secondHalfResult = { name: "主队A", odds: "2.20" };
+        const secondHalfOddEven = { name: "Odd", odds: "1.95" };
+
+        expect(getPreTeamType("10208_2nd_half_result", secondHalfResult, match)).toBe("1");
+        expect(formatPreSelectionLabel(match, "10208_2nd_half_result", secondHalfResult)).toBe("主队A");
+        expect(getPreTeamType("50433_2nd_half_goals_odd_even", secondHalfOddEven, match)).toBe("Odd");
+        expect(formatPreSelectionLabel(match, "50433_2nd_half_goals_odd_even", secondHalfOddEven)).toBe("单");
     });
 
     test("冠军/晋级 market id 标记为仅支持单关", () => {

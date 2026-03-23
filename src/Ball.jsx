@@ -391,7 +391,10 @@ function inplayOddsToDecimal(od) {
 const MAIN_MARKET_KEYS = [
     { key: "40_full_time_result", label: "独赢" },
     { key: "10114_double_chance", label: "双重机会" },
+    { key: "10150_both_teams_to_score", label: "BTTS（双方进球）" },
     { key: "42_half_time_full_time", label: "半全场" },
+    { key: "10208_2nd_half_result", label: "下半场独赢" },
+    { key: "50433_2nd_half_goals_odd_even", label: "下半场进球单双" },
     { key: "1094_to_qualify", label: "晋级" },
     { key: "10116_to_win_the_trophy", label: "冠军" },
     { key: "938_asian_handicap", label: "让球" },
@@ -516,7 +519,13 @@ const SINGLE_ONLY_MARKET_IDS = new Set([
 
 const INPLAY_RESULT_MARKET_KEYS = {
     "1786": "1786_To Qualify",
+    "10115": "10115_Double Chance",
     "10560": "10560_Half Time/Full Time",
+    "50246": "50246_To Win 2nd Half",
+    "50390": "50390_Both Teams to Score in 1st Half",
+    "50391": "50391_Both Teams to Score in 2nd Half",
+    "50461": "50461_Result / Both Teams To Score",
+    "10565": "10565_Both Teams to Score",
     "50169": "50169_Extra Time Result",
     "50191": "50191_Extra Time 1st Half Result",
     "50190": "50190_Extra Time Double Result",
@@ -667,6 +676,14 @@ function getSelectionLabelByTeamType(teamType, match) {
             return "小球";
         case "Exactly":
             return "等于";
+        case "Yes":
+            return "是";
+        case "No":
+            return "否";
+        case "Odd":
+            return "单";
+        case "Even":
+            return "双";
         default:
             return teamType;
     }
