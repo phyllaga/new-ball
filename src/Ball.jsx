@@ -517,6 +517,11 @@ const SINGLE_ONLY_MARKET_IDS = new Set([
     "10116",
 ]);
 
+// 结果类玩法展示模式：
+// - numeric: 1 / X / 2
+// - side: 主 / 平 / 客
+const RESULT_SELECTION_DISPLAY_MODE = "numeric";
+
 const INPLAY_RESULT_MARKET_KEYS = {
     "1786": "1786_To Qualify",
     "10115": "10115_Double Chance",
@@ -558,6 +563,22 @@ const INPLAY_CORRECT_SCORE_MARKET_KEYS = {
     "50275": "50275_Shootout Correct Score",
     "10001": "10001_Final Score",
     "10561": "10561_Half Time Correct Score",
+};
+
+const ROLLING_MARKET_LABELS = {
+    "10001": "波胆",
+    "10561": "半场波胆",
+    "50275": "点球波胆",
+    "50590": "加时上半场波胆",
+    "50591": "加时波胆",
+};
+
+const ROLLING_MARKET_PRIORITY = {
+    "10001": 10,
+    "10561": 11,
+    "50275": 12,
+    "50590": 13,
+    "50591": 14,
 };
 
 function getMarketId(marketKey) {
@@ -653,23 +674,42 @@ function normalizeCompositeTeamType(value, match) {
     return `${left}&${right}`;
 }
 
-function getSelectionLabelByTeamType(teamType, match) {
+function getResultDisplayLabel(teamType, options = {}) {
+    const mode = options?.resultMode === "side" ? "side" : RESULT_SELECTION_DISPLAY_MODE;
+    const labels = mode === "side"
+        ? { "1": "主", "2": "客", X: "平" }
+        : { "1": "1", "2": "2", X: "X" };
+
+    return labels[teamType] || teamType;
+}
+
+function formatCorrectScoreLabel(selectionCode, selectionLabel, scoreText, options = {}) {
+    if (!selectionLabel && !scoreText) return "-";
+    if (!selectionLabel) return scoreText || "-";
+    if (!scoreText) return selectionLabel;
+
+    if (selectionCode === "1" || selectionCode === "2" || selectionCode === "X") {
+        return `${selectionLabel} ${scoreText}`;
+    }
+
+    return `${selectionLabel} ${scoreText}`;
+}
+
+function getSelectionLabelByTeamType(teamType, match, options = {}) {
     const combo = teamType != null ? String(teamType).split("&") : [];
     if (combo.length === 2) {
         const valid = new Set(["1", "2", "X"]);
         const [left, right] = combo;
         if (valid.has(left) && valid.has(right)) {
-            return `${getSelectionLabelByTeamType(left, match)} / ${getSelectionLabelByTeamType(right, match)}`;
+            return `${getSelectionLabelByTeamType(left, match, options)} / ${getSelectionLabelByTeamType(right, match, options)}`;
         }
     }
 
     switch (teamType) {
         case "1":
-            return getHomeName(match);
         case "2":
-            return getAwayName(match);
         case "X":
-            return "平局";
+            return getResultDisplayLabel(teamType, options);
         case "Over":
             return "大球";
         case "Under":
@@ -709,7 +749,7 @@ function formatPreSelectionLabel(match, marketKey, item) {
     }
 
     if (isCorrectScoreMarket(marketKey)) {
-        if (selectionLabel && nameText) return `${selectionLabel} ${nameText}`;
+        if (selectionLabel && nameText) return formatCorrectScoreLabel(selectionCode, selectionLabel, nameText);
         return selectionLabel || nameText || "-";
     }
 
@@ -754,7 +794,7 @@ function formatInplaySelectionLabel(match, mavo, pa) {
     }
 
     if (isCorrectScoreMarket(marketKey)) {
-        if (selectionLabel && rawName) return `${selectionLabel} ${String(rawName).trim()}`;
+        if (selectionLabel && rawName) return formatCorrectScoreLabel(teamType, selectionLabel, String(rawName).trim());
         return selectionLabel || String(rawName || "").trim() || "-";
     }
 
@@ -857,7 +897,7 @@ function MarketOddsCell({ marketKey, label, oddsObj, match, onAddSlip }) {
                         onKeyDown={(e) => e.key === "Enter" && onAddSlip?.({ type: "pre", match, marketKey, label: label || oddsObj.name, item, oddsObj, betPlayId, betPlayName, bigTypeName })}
                         style={{
                             fontSize: 13,
-                            padding: "4px 10px",
+                            padding: "4px 12px",
                             background: "#f3f4f6",
                             borderRadius: 6,
                             color: "#111827",
@@ -865,7 +905,7 @@ function MarketOddsCell({ marketKey, label, oddsObj, match, onAddSlip }) {
                         }}
                     >
                         {formatPreSelectionLabel(match, marketKey, item)}
-                        <span style={{ marginLeft: 6, fontWeight: 600 }}>{item.odds}</span>
+                        <span style={{ marginLeft: 10, fontWeight: 600 }}>{item.odds}</span>
                     </span>
                 ))}
             </div>
@@ -883,12 +923,32 @@ function isMavoDisplayable(mavo) {
     });
 }
 
+function getRollingMarketTitle(mavo) {
+    const id = mavo?.id != null ? String(mavo.id) : mavo?.ID != null ? String(mavo.ID) : "";
+    return ROLLING_MARKET_LABELS[id] || mavo?.na || mavo?.NA || id || "-";
+}
+
+function getOrderedDisplayableTreeResults(treeResults) {
+    return (Array.isArray(treeResults) ? treeResults : [])
+        .map((mavo, index) => ({ mavo, index }))
+        .filter(({ mavo }) => isMavoDisplayable(mavo))
+        .sort((left, right) => {
+            const leftId = left.mavo?.id != null ? String(left.mavo.id) : left.mavo?.ID != null ? String(left.mavo.ID) : "";
+            const rightId = right.mavo?.id != null ? String(right.mavo.id) : right.mavo?.ID != null ? String(right.mavo.ID) : "";
+            const leftPriority = Object.prototype.hasOwnProperty.call(ROLLING_MARKET_PRIORITY, leftId) ? ROLLING_MARKET_PRIORITY[leftId] : 999;
+            const rightPriority = Object.prototype.hasOwnProperty.call(ROLLING_MARKET_PRIORITY, rightId) ? ROLLING_MARKET_PRIORITY[rightId] : 999;
+            if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+            return left.index - right.index;
+        })
+        .map(({ mavo }) => mavo);
+}
+
 /** 滚球：单个玩法（MAVO）展示，co[].pa 为选项，na/pNa 名称，od 赔率；推送 "-" 表示不可下注，界面也显示 "-" 且不可点 */
 function RollingMarketCell({ mavo, match, onAddSlip, highlight }) {
     const allOptions = mavo?.co?.flatMap((c) => c.pa || []) ?? [];
     const options = allOptions;
     if (options.length === 0) return null;
-    const title = mavo.na || mavo.NA || mavo.id || mavo.ID || "";
+    const title = getRollingMarketTitle(mavo);
 
     const isThisMarketHighlighted =
         highlight &&
@@ -918,7 +978,7 @@ function RollingMarketCell({ mavo, match, onAddSlip, highlight }) {
                             onKeyDown={(e) => canAdd && e.key === "Enter" && onAddSlip({ type: "inplay", match, mavo, pa, odDecimal })}
                             style={{
                                 fontSize: 13,
-                                padding: "4px 10px",
+                                padding: "4px 12px",
                                 background: isSuspended ? "#f9fafb" : "#f3f4f6",
                                 borderRadius: 6,
                                 color: isSuspended ? "#9ca3af" : "#111827",
@@ -926,7 +986,7 @@ function RollingMarketCell({ mavo, match, onAddSlip, highlight }) {
                             }}
                         >
                             {formatInplaySelectionLabel(match, mavo, pa)}
-                            <span style={{ marginLeft: 6, fontWeight: 600 }}>{displayOdds}</span>
+                            <span style={{ marginLeft: 10, fontWeight: 600 }}>{displayOdds}</span>
                         </span>
                     );
                 })}
@@ -2009,7 +2069,7 @@ export default function SoccerEarlyMarketPage() {
                                                         gap: 12,
                                                     }}
                                                 >
-                                                    {match.treeResults.filter(isMavoDisplayable).map((mavo, idx) => (
+                                                    {getOrderedDisplayableTreeResults(match.treeResults).map((mavo, idx) => (
                                                         <RollingMarketCell
                                                             key={mavo.id || mavo.ID || idx}
                                                             mavo={mavo}
@@ -2413,10 +2473,13 @@ export default function SoccerEarlyMarketPage() {
 export {
     formatInplaySelectionLabel,
     formatPreSelectionLabel,
+    getOrderedDisplayableTreeResults,
     getInplayOddsMarkets,
     getInplayTeamType,
     getPreTeamType,
     isSingleOnlyMarket,
+    getRollingMarketTitle,
+    getResultDisplayLabel,
     getSelectionLabelByTeamType,
     normalizeTeamType,
 };

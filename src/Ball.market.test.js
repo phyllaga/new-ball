@@ -1,6 +1,9 @@
 import {
     formatInplaySelectionLabel,
     formatPreSelectionLabel,
+    getOrderedDisplayableTreeResults,
+    getRollingMarketTitle,
+    getResultDisplayLabel,
     getInplayOddsMarkets,
     getInplayTeamType,
     getPreTeamType,
@@ -21,14 +24,14 @@ describe("Ball market helpers", () => {
         expect(formatPreSelectionLabel(match, "10143_goal_line", item)).toBe("大球 2.5");
     });
 
-    test("波胆早盘使用 header+比分 作为 teamType", () => {
+    test("波胆早盘使用 header+比分 作为 teamType，并按短标签加比分展示", () => {
         const homeWin = { header: "1", name: "2-1", odds: "9.0" };
         const draw = { header: "Draw", name: "1-1", odds: "6.5" };
 
         expect(getPreTeamType("43_correct_score", homeWin, match)).toBe("1&2-1");
         expect(getPreTeamType("43_correct_score", draw, match)).toBe("X&1-1");
-        expect(formatPreSelectionLabel(match, "43_correct_score", homeWin)).toBe("主队A 2-1");
-        expect(formatPreSelectionLabel(match, "43_correct_score", draw)).toBe("平局 1-1");
+        expect(formatPreSelectionLabel(match, "43_correct_score", homeWin)).toBe("1 2-1");
+        expect(formatPreSelectionLabel(match, "43_correct_score", draw)).toBe("X 1-1");
     });
 
     test("滚球大小球和波胆映射到后端结算 key", () => {
@@ -54,64 +57,78 @@ describe("Ball market helpers", () => {
         expect(getInplayOddsMarkets("10561")).toBe("10561_Half Time Correct Score");
     });
 
-    test("滚球波胆使用盘口方向和比分拼接 teamType，并展示中文标签", () => {
+    test("滚球波胆使用盘口方向和比分拼接 teamType，并展示短标签加比分", () => {
         const mavo = { id: "10001" };
         const pa = { ha: "2", na: "1-0" };
 
         expect(getInplayTeamType(mavo, pa, match)).toBe("2&1-0");
-        expect(formatInplaySelectionLabel(match, mavo, pa)).toBe("客队B 1-0");
+        expect(formatInplaySelectionLabel(match, mavo, pa)).toBe("2 1-0");
     });
 
-    test("双重机会早盘统一 teamType 编码，并显示中文组合", () => {
+    test("滚球波胆标题映射为中文，并在列表排序中优先展示", () => {
+        const generic = { id: "421", na: "Match Goals", co: [{ pa: [{ na: "Over", od: "1.9" }] }] };
+        const correctScore = { id: "10001", na: "Final Score", co: [{ pa: [{ na: "1-0", ha: "1", od: "9.0" }] }] };
+        const halfTimeCorrectScore = { id: "10561", na: "Half Time Correct Score", co: [{ pa: [{ na: "1-0", ha: "1", od: "12.0" }] }] };
+
+        expect(getRollingMarketTitle(correctScore)).toBe("波胆");
+        expect(getRollingMarketTitle(halfTimeCorrectScore)).toBe("半场波胆");
+        expect(getOrderedDisplayableTreeResults([generic, correctScore, halfTimeCorrectScore]).map((mavo) => String(mavo.id))).toEqual([
+            "10001",
+            "10561",
+            "421",
+        ]);
+    });
+
+    test("双重机会早盘统一 teamType 编码，并显示 1/X/2 组合", () => {
         const fullTime = { name: "X2", odds: "1.45" };
         const halfTime = { name: "1X", odds: "1.33" };
 
         expect(getPreTeamType("10114_double_chance", fullTime, match)).toBe("X&2");
         expect(getPreTeamType("10257_half_time_double_chance", halfTime, match)).toBe("1&X");
-        expect(formatPreSelectionLabel(match, "10114_double_chance", fullTime)).toBe("平局 / 客队B");
-        expect(formatPreSelectionLabel(match, "10257_half_time_double_chance", halfTime)).toBe("主队A / 平局");
+        expect(formatPreSelectionLabel(match, "10114_double_chance", fullTime)).toBe("X / 2");
+        expect(formatPreSelectionLabel(match, "10257_half_time_double_chance", halfTime)).toBe("1 / X");
     });
 
-    test("晋级玩法使用 1/2 teamType 并展示球队名", () => {
+    test("晋级玩法使用 1/2 teamType 并展示数字标签", () => {
         const qualify = { name: "主队A", odds: "1.70" };
 
         expect(getPreTeamType("1094_to_qualify", qualify, match)).toBe("1");
-        expect(formatPreSelectionLabel(match, "1094_to_qualify", qualify)).toBe("主队A");
+        expect(formatPreSelectionLabel(match, "1094_to_qualify", qualify)).toBe("1");
     });
 
-    test("加时让球与加时波胆沿用让球/波胆编码规则", () => {
+    test("加时让球与加时波胆沿用让球/波胆编码规则，并展示紧凑标签", () => {
         const handicapMavo = { id: "439" };
         const handicapPa = { na: "主队A", ha: "-0.5" };
         const scoreMavo = { id: "50591" };
         const scorePa = { ha: "1", na: "2-1" };
 
         expect(getInplayTeamType(handicapMavo, handicapPa, match)).toBe("1");
-        expect(formatInplaySelectionLabel(match, handicapMavo, handicapPa)).toBe("主队A (-0.5)");
+        expect(formatInplaySelectionLabel(match, handicapMavo, handicapPa)).toBe("1 (-0.5)");
         expect(getInplayTeamType(scoreMavo, scorePa, match)).toBe("1&2-1");
-        expect(formatInplaySelectionLabel(match, scoreMavo, scorePa)).toBe("主队A 2-1");
+        expect(formatInplaySelectionLabel(match, scoreMavo, scorePa)).toBe("1 2-1");
     });
 
-    test("半全场玩法把名称组合转为 1/X/2 的 teamType", () => {
+    test("半全场玩法把名称组合转为 1/X/2 的 teamType，并显示数字组合", () => {
         const preItem = { name: "主队A - 平局", odds: "6.0" };
         const inplayMavo = { id: "10560" };
         const inplayPa = { na: "Draw - 客队B" };
 
         expect(getPreTeamType("42_half_time_full_time", preItem, match)).toBe("1&X");
-        expect(formatPreSelectionLabel(match, "42_half_time_full_time", preItem)).toBe("主队A / 平局");
+        expect(formatPreSelectionLabel(match, "42_half_time_full_time", preItem)).toBe("1 / X");
         expect(getInplayTeamType(inplayMavo, inplayPa, match)).toBe("X&2");
-        expect(formatInplaySelectionLabel(match, inplayMavo, inplayPa)).toBe("平局 / 客队B");
+        expect(formatInplaySelectionLabel(match, inplayMavo, inplayPa)).toBe("X / 2");
     });
 
-    test("点球主玩法沿用独赢/让球/大小球/波胆编码", () => {
+    test("点球主玩法沿用独赢/让球/大小球/波胆编码，并显示紧凑标签", () => {
         const shootoutResult = { id: "50151" };
         const shootoutHandicap = { id: "440" };
         const shootoutGoalLine = { id: "431" };
         const shootoutScore = { id: "50275" };
 
         expect(getInplayTeamType(shootoutResult, { na: "主队A" }, match)).toBe("1");
-        expect(formatInplaySelectionLabel(match, shootoutResult, { na: "主队A" })).toBe("主队A");
+        expect(formatInplaySelectionLabel(match, shootoutResult, { na: "主队A" })).toBe("1");
         expect(getInplayTeamType(shootoutHandicap, { na: "客队B", ha: "+0.5" }, match)).toBe("2");
-        expect(formatInplaySelectionLabel(match, shootoutHandicap, { na: "客队B", ha: "+0.5" })).toBe("客队B (+0.5)");
+        expect(formatInplaySelectionLabel(match, shootoutHandicap, { na: "客队B", ha: "+0.5" })).toBe("2 (+0.5)");
         expect(formatInplaySelectionLabel(match, shootoutGoalLine, { na: "Under", ha: "7.5" })).toBe("小球 7.5");
         expect(getInplayTeamType(shootoutScore, { ha: "1", na: "4-3" }, match)).toBe("1&4-3");
     });
@@ -123,7 +140,7 @@ describe("Ball market helpers", () => {
         expect(getPreTeamType("760_corners", cornerGoalLine, match)).toBe("Under");
         expect(formatPreSelectionLabel(match, "760_corners", cornerGoalLine)).toBe("小球 9.5");
         expect(getPreTeamType("10535_corner_handicap", cornerHandicap, match)).toBe("1");
-        expect(formatPreSelectionLabel(match, "10535_corner_handicap", cornerHandicap)).toBe("主队A (-1.5)");
+        expect(formatPreSelectionLabel(match, "10535_corner_handicap", cornerHandicap)).toBe("1 (-1.5)");
     });
 
     test("双重机会历史编码兼容 2&X 并统一到 X&2", () => {
@@ -146,9 +163,15 @@ describe("Ball market helpers", () => {
         const secondHalfOddEven = { name: "Odd", odds: "1.95" };
 
         expect(getPreTeamType("10208_2nd_half_result", secondHalfResult, match)).toBe("1");
-        expect(formatPreSelectionLabel(match, "10208_2nd_half_result", secondHalfResult)).toBe("主队A");
+        expect(formatPreSelectionLabel(match, "10208_2nd_half_result", secondHalfResult)).toBe("1");
         expect(getPreTeamType("50433_2nd_half_goals_odd_even", secondHalfOddEven, match)).toBe("Odd");
         expect(formatPreSelectionLabel(match, "50433_2nd_half_goals_odd_even", secondHalfOddEven)).toBe("单");
+    });
+
+    test("结果类展示支持切到 主/平/客 模式", () => {
+        expect(getResultDisplayLabel("1", { resultMode: "side" })).toBe("主");
+        expect(getResultDisplayLabel("2", { resultMode: "side" })).toBe("客");
+        expect(getResultDisplayLabel("X", { resultMode: "side" })).toBe("平");
     });
 
     test("冠军/晋级 market id 标记为仅支持单关", () => {
